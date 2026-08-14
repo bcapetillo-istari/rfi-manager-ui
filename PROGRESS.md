@@ -1,5 +1,22 @@
 # PROGRESS
 
+## MVP verification pass (done, 2026-08-14)
+
+Two adversarial code reviews (pipeline core; UI + tests) plus an 8-scenario
+headless UI exercise (`scripts/ui_smoke.py`). All confirmed findings fixed:
+restart-loop cap (bounded spend on persistent platform errors), upload-adopt
+on crash-between-upload-and-persist, crash-safe retry-counter ordering,
+stale-schema survival + dedup in rebuild (FR3/FR12), resume detection for
+llm_job_submitted, force re-extract actually re-running (FR5), batch
+re-entrancy guard, project-switch state reset, double-commit guard, and
+several minors (see commit 8c70eaa). pytest: 95 passed; smoke: 8/8.
+
+Known-good MVP scope: Stage 1 + review + commit, Stage 2 batch + retry,
+comparison table (sort/search/filters/detail), resume (FR11), rebuild (FR12),
+credential pickers. Deferred: M4 (export CSV/XLSX, publish report,
+--selftest flag), and everything blocked on the undeployed
+@istari_utils:rfi_manager module.
+
 ## Re-architecture — LLM calls as Istari Agent jobs (done, 2026-08-14)
 
 Per docs/LLM_Call_Flow.md (PRD updated first): all LLM calls now run as
