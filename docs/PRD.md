@@ -10,20 +10,28 @@ table — with every value traceable to a versioned file on Istari.
 ## 2. Product summary
 A desktop application (Python 3.11+, PySide6) named "RFI Manager" that uses the
 Istari Python SDK (`istari-digital-client` — verify current package name against
-docs.istaridigital.com) and a configurable LLM endpoint. Three-stage flow:
+docs.istaridigital.com). ALL LLM calls are routed through Istari Agent jobs —
+the app never calls an LLM API directly (see docs/LLM_Call_Flow.md; the
+`@istari_utils:rfi_manager` module hosts two LLM functions:
+`extract_rfi_requirements` and `extract_response_requirements`, each owning its
+prompt). Three-stage flow:
 
 Stage 1 — Link RFI: user enters the Istari UUID of an RFI file (and optionally a
-specific revision). App runs Istari's PDF data-extraction function on it, retrieves
-the extracted text artifact, sends text + Prompt A to the LLM, and receives a
-structured requirements list. User reviews/edits the requirements in a review
-screen, then commits: the requirements JSON is uploaded to Istari and linked to
-the source RFI file/revision. This JSON is the schema of record.
+specific revision). App runs Istari's PDF data-extraction function on it, then
+submits an `extract_rfi_requirements` job referencing the extracted-text
+artifact revision; the job's raw-output artifact is read back, validated
+client-side, and shown as a structured requirements list. User reviews/edits
+the requirements in a review screen, then commits: the requirements JSON is
+uploaded to Istari and linked to the source RFI file/revision. This JSON is the
+schema of record.
 
 Stage 2 — Ingest responses: user enters one or more UUIDs of RFI response PDFs
-already on Istari (single entry field + multi-line batch entry). For each: run the
-extraction function, retrieve text, send text + Prompt B (generated from the
-committed requirements) to the LLM, validate the returned answers, upload the
-answers JSON to Istari linked to the response file/revision.
+already on Istari (single entry field + multi-line batch entry). For each: run
+the extraction function, then submit an `extract_response_requirements` job
+(inputs: extracted-text revision reference + the committed requirements JSON,
+so the module-side prompt cannot drift from the schema of record), read back
+the raw-output artifact, validate the answers client-side, upload the answers
+JSON to Istari linked to the response file/revision.
 
 Stage 3 — Compare: all ingested responses render as rows in a table (columns =
 requirements). Global search, per-column sort, filter by completeness/flags.
@@ -32,20 +40,32 @@ UUID, schema version). Export CSV/XLSX and "Publish report" (self-contained
 static HTML uploaded to Istari).
 
 ## 3. Architecture requirements
-1. Layered: `istari_adapter.py` (all SDK calls behind a small interface),
-   `llm_adapter.py` (all LLM calls behind an interface, provider set by config),
-   `pipeline.py` (extract/prompt/validate/upload orchestration, no Qt imports),
+1. Layered: `istari_adapter.py` (all SDK calls behind a small interface —
+   including LLM-function job submission, since LLM calls ARE platform jobs),
+   `pipeline.py` (extract/LLM-job/validate/upload orchestration, no Qt imports),
    `models.py` (dataclasses for Requirement, Answer, ResponseRecord),
    `ui/` (PySide6 only, no SDK or HTTP calls directly from UI code).
-2. All SDK/LLM/network work runs on QThreadPool workers (QRunnable) communicating
+2. All SDK/network work runs on QThreadPool workers (QRunnable) communicating
    via signals. The UI thread never blocks. Every long operation reports progress
    states: queued -> extracting -> llm -> validating -> uploading -> done|failed(reason).
 3. Config from `config.toml` + env-var overrides: istari base URL, istari token
-   (env only, never written to disk by the app), LLM provider/model/endpoint/key
-   (key env only), request timeouts, retry counts.
-4. LLM adapter interface: `complete(system: str, user: str) -> str`. Ship two
-   implementations: `anthropic` (messages API) and `openai_compatible` (generic
-   chat-completions URL, covers most gov/enclave endpoints). Selection via config.
+   (env only, never written to disk by the app), default LLM provider/model
+   (forwarded as job parameters), request timeouts, retry counts. There is NO
+   LLM API key on the client: LLM credentials are Istari Linked Accounts
+   (stored credentials), bound to jobs by reference via `auth_bindings`. The
+   UI offers credential pickers populated from `list_credentials()`.
+4. LLM call contract: submit a job to the `@istari_utils:rfi_manager` module
+   functions (`extract_rfi_requirements` for Stage 1,
+   `extract_response_requirements` for Stage 2), attached to the model being
+   analyzed. Job parameters reference the extracted-text artifact revision
+   (never the text itself); Stage 2 additionally passes the committed
+   requirements as JSON. Each job emits one raw-LLM-output artifact
+   (`llm_output.json`) which the client reads, validates (§4), and — only
+   after validation and review — turns into the final committed artifacts.
+   The functions never upload final artifacts. Retry-once (§4) resubmits the
+   job with a `validation_errors` parameter. Prompts live in the module repo,
+   not this app. Function/tool identifiers live in one constants block in
+   istari_adapter.py until the deployed manifest fixes them.
 5. SDK usage notes for the implementer: Istari has no public REST API — use the
    official Python client. Consult docs.istaridigital.com for current client usage
    (register/add model, get file/revision, run function/job, poll job status, list
@@ -61,13 +81,16 @@ static HTML uploaded to Istari).
       (write temp file, fsync, rename). Format has a version field.
       Table content is NOT stored here — it is re-fetched from Istari on load.
    b. In-flight checkpoints: each response's pipeline is an explicit state
-      machine (queued -> job_submitted -> text_retrieved -> llm_returned ->
-      validated -> uploaded -> done | failed(reason)). Persist evidence with
-      each transition: job id on submit (restart polls the same job instead of
-      resubmitting); raw LLM output cached to a local scratch file on return
-      (LLM calls are the expensive step — never re-pay for a crash between
-      LLM return and upload). On startup, offer to resume any response in an
-      intermediate state from its furthest checkpoint.
+      machine (queued -> job_submitted -> text_retrieved -> llm_job_submitted
+      -> llm_returned -> validated -> uploaded -> done | failed(reason)).
+      Persist evidence with each transition: extraction job id on submit and
+      LLM job id on LLM submit (restart polls the same job instead of
+      resubmitting); the LLM job's raw-output artifact on the platform IS the
+      post-LLM checkpoint (LLM calls are the expensive step — never re-pay
+      for a crash between LLM return and upload; no local scratch cache).
+      The retry-once counter (llm_attempts) is persisted so a crash cannot
+      cause more than one retry. On startup, offer to resume any response in
+      an intermediate state from its furthest checkpoint.
    c. Rebuild from platform: given only an RFI UUID, the app must be able to
       reconstruct the project by traversing Istari links: locate the latest
       requirements artifact (schema + version), then locate answers artifacts
@@ -106,9 +129,10 @@ Validation rules (pipeline, applied to all LLM output): strip markdown fences;
 JSON must parse; every requirement id present exactly once; no unknown ids
 (unknown -> warning, dropped); numeric values parse as numbers; enum values in
 options; booleans are true/false; NOT_FOUND allowed anywhere with confidence
-"none". On validation failure: retry the LLM call ONCE with the error list
-appended to the prompt; if still invalid, mark the item failed with reasons
-shown in the UI. Never upload an artifact that failed validation.
+"none". On validation failure: retry the LLM job ONCE, passing the error list
+via the validation_errors job parameter (the module appends it to its prompt);
+if still invalid, mark the item failed with reasons shown in the UI. Never
+upload an artifact that failed validation.
 
 ## 5. Functional requirements
 FR1  Stage 1 UI: UUID (+ optional revision) input; "Extract requirements" button;
@@ -137,10 +161,14 @@ FR7  Row detail pane: selecting a row shows per-requirement value, quote, page,
 FR8  Export: CSV and XLSX of current (filtered) view. "Publish report": render a
      self-contained static HTML table (no scripts required to read) and upload it
      to Istari linked to the RFI.
-FR9  Prompts: Prompt A (requirements extraction) and Prompt B (answers extraction,
-     generated from the committed requirements so they cannot drift) live in
-     `prompts.py` as templates with a visible version string included in artifact
-     metadata.
+FR9  Prompts: Prompt A (requirements extraction) and Prompt B (answers
+     extraction) live in the `@istari_utils:rfi_manager` module repo, each
+     embedded in its own function script. Prompt B is generated module-side
+     from the committed requirements JSON the app passes as a job parameter,
+     so it cannot drift from the schema of record. Artifact metadata stamps
+     the function identifier as prompt_version (module version appended when
+     the deployed manifest exposes it), so hosted-script version skew is
+     detectable.
 FR10 All errors are surfaced in the UI with actionable text; no silent failures;
      a session log panel records every SDK call, job id, artifact UUID (this is
      the operator's audit view).
@@ -163,15 +191,18 @@ no packaging/installer work (run from source; packaging is v2); no direct PDF
 viewing (show UUIDs/links to open in Istari instead).
 
 ## 7. Testing
-pytest, no network in tests. `istari_adapter` and `llm_adapter` get fake
+pytest, no network in tests. `istari_adapter` (incl. the LLM functions) gets fake
 implementations for tests.
   T1 validation: table-driven tests covering every rule in section 4, including
      fence stripping, retry-once path, unknown ids, type coercion failures.
   T2 pipeline: end-to-end with fakes — Stage 1 produces a requirements artifact
      upload call with correct linkage args; Stage 2 produces answers artifact
      with correct provenance; idempotency skip path; force re-extract path.
-  T3 prompt generation: Prompt B contains every committed requirement id and
-     its constraints; changing schema changes prompt version stamp.
+  T3 LLM-job contract: the extract_response_requirements job's
+     requirements_json parameter contains every committed requirement id and
+     its constraints; changing schema changes the artifact prompt-version
+     stamp; auth_bindings carry the selected credentials by reference (never
+     a raw key in parameters).
   T4 models/serialization round-trip; project file save/load.
   T5 report renderer: published HTML contains all visible rows, no <script src>,
      no external URLs, escapes user data.
