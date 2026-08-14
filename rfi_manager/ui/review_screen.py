@@ -30,6 +30,7 @@ class ReviewScreen(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._busy = False  # a commit is in flight; edits must not re-enable it
         layout = QVBoxLayout(self)
 
         self.table = QTableWidget(0, len(_COLUMNS))
@@ -52,6 +53,7 @@ class ReviewScreen(QWidget):
         buttons.addWidget(QLabel("schema_version:"))
         self.schema_edit = QLineEdit("1.0")
         self.schema_edit.setMaximumWidth(80)
+        self.schema_edit.textChanged.connect(lambda _t: self._revalidate())
         buttons.addWidget(self.schema_edit)
         self.commit_button = QPushButton("Commit to Istari")
         self.commit_button.clicked.connect(self._on_commit)
@@ -81,7 +83,8 @@ class ReviewScreen(QWidget):
             "label": req.label if req else "",
             "description": req.description if req else "",
             "unit": (req.unit or "") if req else "",
-            "options": ", ".join(req.options or []) if req else "",
+            # '|'-separated: enum options may legally contain commas
+            "options": " | ".join(req.options or []) if req else "",
         }
         for name, value in values.items():
             self.table.setItem(row, _COL[name], QTableWidgetItem(value))
@@ -132,7 +135,7 @@ class ReviewScreen(QWidget):
                 return item.text().strip() if item else ""
 
             combo = self.table.cellWidget(row, _COL["type"])
-            options = [o.strip() for o in text("options").split(",") if o.strip()]
+            options = [o.strip() for o in text("options").split("|") if o.strip()]
             required_item = self.table.item(row, _COL["required"])
             reqs.append(
                 Requirement(
@@ -179,15 +182,14 @@ class ReviewScreen(QWidget):
         errors, warnings = self.validate()
         parts = [f"✗ {e}" for e in errors] + [f"⚠ {w}" for w in warnings]
         self.validation_label.setText("\n".join(parts))
-        self.commit_button.setEnabled(not errors)
+        self.commit_button.setEnabled(not errors and not self._busy)
 
     def _on_commit(self) -> None:
         errors, _warnings = self.validate()
-        if errors:
+        if errors or self._busy:
             return  # button should be disabled; never commit invalid data
         self.commit_requested.emit(self.requirements(), self.schema_edit.text().strip())
 
     def set_busy(self, busy: bool) -> None:
-        self.commit_button.setEnabled(not busy)
-        if not busy:
-            self._revalidate()
+        self._busy = busy
+        self._revalidate()

@@ -130,14 +130,19 @@ class IstariAdapter:
     """Real adapter over the official Istari Python client."""
 
     def __init__(self, config: IstariConfig) -> None:
-        """Build ``Configuration(registry_url=..., registry_auth_token=...)``
-        and instantiate both ``Client`` (v2 surface) and ``V3Client`` (needed
-        for revision relationships, which are not on ``Client``)."""
+        """Build ``Configuration(registry_url=..., registry_auth_token=...,
+        http_request_timeout_secs=..., retry_*=...)`` — request timeout and
+        retry counts from config (PRD §3.3) — and instantiate both ``Client``
+        (v2 surface) and ``V3Client`` (needed for revision relationships,
+        which are not on ``Client``)."""
         from istari_digital_client import Client, Configuration, V3Client
 
         sdk_config = Configuration(
             registry_url=config.base_url,
             registry_auth_token=config.token,
+            http_request_timeout_secs=int(config.request_timeout_s),
+            retry_enabled=config.retries > 0,
+            retry_max_attempts=max(config.retries, 1),
         )
         self._client = Client(config=sdk_config)
         self._v3 = V3Client(sdk_config)

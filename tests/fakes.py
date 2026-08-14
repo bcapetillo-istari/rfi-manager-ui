@@ -48,6 +48,8 @@ class FakeIstari:
         self.revision_owner: dict[str, str] = {}  # revision_id -> resource id
         self.auto_complete_jobs = True
         self.llm_outputs: list[str] = []  # FIFO consumed by completing LLM jobs
+        self.suppress_llm_artifacts = False  # simulate a module writing no output
+        self.pending_text: dict[str, str] = {}  # model_id -> text.txt-to-be
         # call logs for assertions (T2/T3: linkage, provenance, contract args)
         self.upload_calls: list[dict[str, Any]] = []
         self.link_calls: list[tuple[str, str]] = []
@@ -71,8 +73,16 @@ class FakeIstari:
         for rev_id in rev_ids:
             self.revision_owner[rev_id] = model_id
         if text:
-            self._add_artifact(model_id, EXTRACT_TEXT_ARTIFACT, text)
+            # like the real platform, text.txt only exists after an
+            # extraction job completes (see _complete)
+            self.pending_text[model_id] = text
         return info
+
+    def materialize_text(self, model_id: str) -> None:
+        """Test shortcut: run an extraction job to completion so text.txt
+        exists (for tests that skip the pipeline's extraction step)."""
+        job_id = self.submit_extraction_job(model_id)
+        self._complete(job_id)
 
     def add_credential(self, name: str, auth_type: str = "token") -> CredentialInfo:
         cred = CredentialInfo(
@@ -115,7 +125,16 @@ class FakeIstari:
     def _complete(self, job_id: str) -> None:
         job = self.jobs[job_id]
         job["state"] = JobState.COMPLETED
-        if job["kind"] == "llm" and not job.get("output_written"):
+        if job.get("output_written"):
+            return
+        if job["kind"] == "extract":
+            text = self.pending_text.get(job["model_id"])
+            if text is not None:
+                self._add_artifact(job["model_id"], EXTRACT_TEXT_ARTIFACT, text)
+            job["output_written"] = True
+        elif job["kind"] == "llm":
+            if self.suppress_llm_artifacts:
+                return  # deployed module wrote nothing / wrong artifact name
             if not self.llm_outputs:
                 raise AssertionError("FakeIstari ran out of queued LLM outputs")
             raw = self.llm_outputs.pop(0)
@@ -210,14 +229,22 @@ class FakeIstari:
 
     def list_json_artifacts(
         self, model_id: str, name: str
-    ) -> list[tuple[ArtifactInfo, dict[str, Any]]]:
+    ) -> list[tuple[ArtifactInfo, Any]]:
+        """Parity with the real adapter: returns whatever parses as JSON
+        (object, array, ...); unparseable artifacts are skipped, not raised."""
         if model_id not in self.models:
             raise IstariError(f"cannot fetch model {model_id}: not found")
-        return [
-            (info, payload)
-            for info, payload in reversed(self.artifacts[model_id])
-            if info.name == name and isinstance(payload, dict)
-        ]
+        results: list[tuple[ArtifactInfo, Any]] = []
+        for info, payload in reversed(self.artifacts[model_id]):
+            if info.name != name:
+                continue
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except ValueError:
+                    continue
+            results.append((info, payload))
+        return results
 
     def create_link(self, source_revision_id: str, produced_revision_id: str) -> LinkInfo:
         link = LinkInfo(

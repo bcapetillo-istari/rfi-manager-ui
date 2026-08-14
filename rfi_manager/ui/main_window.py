@@ -23,8 +23,14 @@ from PySide6.QtWidgets import (
 
 from .. import pipeline
 from ..istari_adapter import CredentialInfo, CredentialSelection
-from ..models import PipelineState, Project, Requirement, ResponseRecord
-from ..models import RequirementsArtifact
+from ..models import (
+    RESUMABLE_STATES,
+    PipelineState,
+    Project,
+    Requirement,
+    RequirementsArtifact,
+    ResponseRecord,
+)
 from ..persistence import load_project, save_project
 from ..pipeline import LLMJobConfig, Stage1Result
 from .comparison_page import ComparisonPage
@@ -32,17 +38,6 @@ from .review_screen import ReviewScreen
 from .stage1_page import Stage1Page
 from .stage2_page import Stage2Page
 from .workers import Worker
-
-_INCOMPLETE_STATES = frozenset(
-    {
-        PipelineState.QUEUED,
-        PipelineState.JOB_SUBMITTED,
-        PipelineState.TEXT_RETRIEVED,
-        PipelineState.LLM_RETURNED,
-        PipelineState.VALIDATED,
-        PipelineState.UPLOADED,
-    }
-)
 
 
 class MainWindow(QMainWindow):
@@ -73,6 +68,7 @@ class MainWindow(QMainWindow):
         self.project_path: Path | None = None
         self.requirements_artifact: RequirementsArtifact | None = None
         self._stage1_result: Stage1Result | None = None
+        self._batch_running = False
 
         self.stage1_page = Stage1Page()
         self.review_screen = ReviewScreen()
@@ -136,23 +132,24 @@ class MainWindow(QMainWindow):
         self._spawn(worker)
 
     def _on_credentials_listed(self, credentials: list[CredentialInfo]) -> None:
-        for combo in (self.istari_cred_combo, self.llm_cred_combo):
+        for combo, wanted in ((self.istari_cred_combo, "istari"),
+                              (self.llm_cred_combo, "llm")):
             selected = combo.currentData()
             combo.clear()
             for cred in credentials:
                 label = cred.name + (f" ({cred.auth_type})" if cred.auth_type else "")
                 combo.addItem(label, cred.credential_id)
+            restored = False
             if selected is not None:
                 index = combo.findData(selected)
-                if index >= 0:
+                if index >= 0:  # keep the user's manual choice across refreshes
                     combo.setCurrentIndex(index)
-        # heuristic preselect by auth_type when the platform tags them
-        for combo, wanted in ((self.istari_cred_combo, "istari"),
-                              (self.llm_cred_combo, "llm")):
-            for i, cred in enumerate(credentials):
-                if cred.auth_type and wanted in cred.auth_type.lower():
-                    combo.setCurrentIndex(i)
-                    break
+                    restored = True
+            if not restored:  # heuristic preselect by auth_type tag
+                for i, cred in enumerate(credentials):
+                    if cred.auth_type and wanted in cred.auth_type.lower():
+                        combo.setCurrentIndex(i)
+                        break
         self.log(f"{len(credentials)} linked account(s) available")
 
     def _llm_job_config(self) -> LLMJobConfig | None:
@@ -195,6 +192,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ stage 1
 
     def start_extraction(self, rfi_uuid: str, revision_id: str) -> None:
+        if self._batch_running:
+            QMessageBox.warning(self, "Busy", "A batch is running — wait for it to finish.")
+            return
         if self.project is not None and self.project.schema_version:
             answer = QMessageBox.question(
                 self,
@@ -270,15 +270,27 @@ class MainWindow(QMainWindow):
             send_progress=True,
         )
         worker.signals.progress.connect(self._on_progress)
-        worker.signals.finished.connect(self._on_commit_done)
+        # bind THIS extraction's result to the handler — re-running Stage 1
+        # while a commit is in flight must not cross-stamp results
+        worker.signals.finished.connect(
+            lambda commit_result, r=result: self._on_commit_done(commit_result, r)
+        )
         worker.signals.failed.connect(self._on_commit_failed)
         self._spawn(worker)
 
-    def _on_commit_done(self, commit_result) -> None:
+    def _on_commit_done(self, commit_result, result: Stage1Result) -> None:
         artifact, info = commit_result
         self.review_screen.set_busy(False)
-        result = self._stage1_result
-        assert result is not None
+        if self.project is not None and self.project.rfi_uuid != result.rfi.model_id:
+            # the user switched projects while the commit was in flight —
+            # the artifact is on the platform, but don't stamp it into an
+            # unrelated project file
+            self.log(
+                f"committed requirements artifact {info.artifact_id} for RFI "
+                f"{result.rfi.model_id}, but the open project is "
+                f"{self.project.rfi_uuid} — not recorded locally"
+            )
+            return
         if self.project is None:
             self.project = Project(
                 rfi_uuid=result.rfi.model_id, rfi_revision=result.rfi_revision_id
@@ -307,20 +319,41 @@ class MainWindow(QMainWindow):
         if self.project is None or self.requirements_artifact is None:
             QMessageBox.warning(self, "No schema", "Commit a requirements schema first.")
             return
+        current_schema = self.project.schema_version
         records: list[ResponseRecord] = []
         for uuid in uuids:
             record = self.project.response_for(uuid)
             if record is None:
                 record = ResponseRecord(uuid=uuid)
                 self.project.responses.append(record)
+            elif force or (
+                record.state is PipelineState.DONE
+                and record.schema_version != current_schema
+            ):
+                # restart from scratch: force re-extract (FR5), or a DONE
+                # record answered under an older schema (FR3 re-run) —
+                # replace the record, since done has no outgoing edges
+                fresh = ResponseRecord(uuid=uuid)
+                self.project.responses[self.project.responses.index(record)] = fresh
+                record = fresh
             elif record.state is PipelineState.FAILED:
                 record.transition(PipelineState.QUEUED)
+            elif record.state is PipelineState.DONE:
+                # same revision+schema: FR5 idempotency, nothing to do
+                self.stage2_page.update_status(
+                    uuid, record.state.value,
+                    "already done for this schema — use Force re-extract",
+                )
+                continue
             records.append(record)
             self.stage2_page.update_status(uuid, record.state.value, "")
-        self._run_responses(records, force=force)
+        if records:
+            self._run_responses(records, force=force)
 
     def retry_response(self, uuid: str) -> None:
         """FR4: retry a failed response."""
+        if self._batch_running:  # belt-and-suspenders; the button is disabled too
+            return
         if self.project is None or self.requirements_artifact is None:
             return
         record = self.project.response_for(uuid)
@@ -335,7 +368,12 @@ class MainWindow(QMainWindow):
 
     def _run_responses(self, records: list[ResponseRecord], *, force: bool) -> None:
         """Process a batch sequentially in ONE worker so project-file writes
-        stay single-threaded."""
+        stay single-threaded. Re-entrancy guarded: a second batch (retry click,
+        resume, rebuild) must wait for the running one."""
+        if self._batch_running:
+            QMessageBox.warning(self, "Busy", "A batch is already running — "
+                                "wait for it to finish.")
+            return
         llm_config = self._llm_job_config()
         if llm_config is None:
             return
@@ -359,6 +397,7 @@ class MainWindow(QMainWindow):
                 )
             return records
 
+        self._batch_running = True
         self.stage2_page.set_busy(True)
         worker = Worker(batch, send_progress=True, send_log=True)
         worker.signals.progress.connect(self._on_response_progress)
@@ -372,6 +411,7 @@ class MainWindow(QMainWindow):
         self.log(f"{state}: {uuid} {message}".rstrip())
 
     def _on_batch_done(self, records: list[ResponseRecord]) -> None:
+        self._batch_running = False
         self.stage2_page.set_busy(False)
         for record in records:
             self.stage2_page.update_status(
@@ -382,6 +422,7 @@ class MainWindow(QMainWindow):
         self.refresh_comparison()
 
     def _on_batch_failed(self, reason: str) -> None:
+        self._batch_running = False
         self.stage2_page.set_busy(False)
         self.log(f"batch FAILED unexpectedly: {reason}")
         QMessageBox.critical(self, "Ingest failed", reason)
@@ -429,11 +470,15 @@ class MainWindow(QMainWindow):
             self.open_project(Path(chosen))
 
     def open_project(self, path: Path) -> None:
+        if self._batch_running:
+            QMessageBox.warning(self, "Busy", "A batch is running — wait for it to finish.")
+            return
         try:
             project = load_project(path)
         except (OSError, ValueError) as e:
             QMessageBox.critical(self, "Open failed", str(e))
             return
+        self._reset_session_state()
         self.project = project
         self.project_path = path
         self.log(f"opened project {path} (RFI {project.rfi_uuid})")
@@ -462,7 +507,7 @@ class MainWindow(QMainWindow):
                 record.uuid, record.state.value, record.error or ""
             )
         incomplete = [
-            r for r in self.project.responses if r.state in _INCOMPLETE_STATES
+            r for r in self.project.responses if r.state in RESUMABLE_STATES
         ]
         if incomplete:
             answer = QMessageBox.question(
@@ -487,7 +532,21 @@ class MainWindow(QMainWindow):
         if ok and rfi_uuid.strip():
             self.open_from_rfi(rfi_uuid.strip())
 
+    def _reset_session_state(self) -> None:
+        """Clear all state tied to the previous project so nothing stale can
+        leak across a project switch (review screen, uncommitted stage-1
+        result, schema of record, comparison table, status list)."""
+        self._stage1_result = None
+        self.requirements_artifact = None
+        self.review_screen.load([], "1.0")
+        self.comparison_page.load([], [])
+        self.stage2_page.status_table.setRowCount(0)
+        self._stack.setCurrentWidget(self.stage1_page)
+
     def open_from_rfi(self, rfi_uuid: str) -> None:
+        if self._batch_running:
+            QMessageBox.warning(self, "Busy", "A batch is running — wait for it to finish.")
+            return
         self.log(f"rebuilding project from platform for RFI {rfi_uuid} (FR12)")
         istari = self._istari
 
@@ -503,6 +562,7 @@ class MainWindow(QMainWindow):
 
     def _on_rebuilt(self, result) -> None:
         project, artifact = result
+        self._reset_session_state()
         self.project = project
         self.project_path = None
         self.requirements_artifact = artifact

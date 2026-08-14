@@ -28,6 +28,7 @@ class Stage2Page(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._busy = False
         layout = QVBoxLayout(self)
 
         layout.addWidget(QLabel("Response UUID:"))
@@ -89,12 +90,18 @@ class Stage2Page(QWidget):
     def _on_selection(self) -> None:
         row = self.status_table.currentRow()
         state_item = self.status_table.item(row, 1) if row >= 0 else None
-        self.retry_button.setEnabled(bool(state_item and state_item.text() == "failed"))
+        self.retry_button.setEnabled(
+            not self._busy and bool(state_item and state_item.text() == "failed")
+        )
 
     # ------------------------------------------------------------- status
 
     def set_busy(self, busy: bool) -> None:
+        """While a batch runs, neither a new ingest nor a retry may start —
+        both would spawn a second worker mutating the same project."""
+        self._busy = busy
         self.ingest_button.setEnabled(not busy)
+        self._on_selection()
 
     def _row_for(self, uuid: str) -> int:
         for row in range(self.status_table.rowCount()):

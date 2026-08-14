@@ -212,6 +212,9 @@ class ComparisonPage(QWidget):
     def load(self, requirements: list[Requirement], rows) -> None:
         self._requirements = requirements
         self.model.set_data(requirements, rows)
+        # a model reset clears the selection without a selectionChanged
+        # signal — drop the previous data set's detail pane too (FR7)
+        self.detail.clear()
 
     # FR7: detail pane with copyable provenance UUIDs
     def _on_selection(self) -> None:

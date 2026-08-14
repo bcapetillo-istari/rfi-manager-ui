@@ -223,6 +223,7 @@ def test_long_label_is_warning():
 # ------------------------------------------- retry-once (LLM jobs, PRD §4)
 
 def run_job(istari, model_id, config=None):
+    istari.materialize_text(model_id)  # LLM jobs reference the text.txt revision
     return run_llm_job_validated(
         istari, model_id, LLM_FUNCTION_EXTRACT_RESPONSE,
         config or LLMJobConfig(credentials=istari.default_credentials()),

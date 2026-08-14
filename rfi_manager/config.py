@@ -59,8 +59,13 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError(
             f"{path} not found — copy config.example.toml to config.toml and edit it"
         )
-    with path.open("rb") as f:
-        raw = tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            raw = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path} is not valid TOML: {e}") from e
+    except OSError as e:
+        raise ConfigError(f"cannot read {path}: {e}") from e
 
     istari_raw = raw.get("istari", {})
     llm_raw = raw.get("llm", {})

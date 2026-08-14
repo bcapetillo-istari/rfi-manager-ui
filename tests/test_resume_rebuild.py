@@ -247,6 +247,59 @@ def test_resume_is_idempotent_on_links(tmp_path: Path):
     assert istari.link_calls == links_before  # no duplicate edges
 
 
+def test_persistent_missing_llm_output_fails_instead_of_looping(tmp_path: Path):
+    """A module that never writes llm_output.json (e.g. wrong artifact name in
+    the deployed manifest) must end FAILED after one clean restart — not loop
+    forever resubmitting paid jobs."""
+    istari, project, req_artifact, response, path = make_setup(tmp_path)
+    istari.suppress_llm_artifacts = True
+    record = start_record(istari, project, response)
+
+    result = process_response(
+        istari, llm_config(istari), project, path, record, req_artifact,
+        poll_interval_s=0, force=True,
+    )
+
+    assert result.state is PipelineState.FAILED
+    assert "unusable" in result.error
+    # one original run + one clean restart — bounded spend
+    assert len(istari.llm_calls) == 2
+    assert len(istari.job_submissions) == 2
+
+
+def test_crash_between_upload_and_persist_adopts_instead_of_reupload(tmp_path: Path):
+    """Crash after upload_json_artifact succeeded but before the uploaded
+    state was persisted: resume must adopt the existing artifact, not upload
+    a duplicate (§3.6b/T6)."""
+    istari, project, req_artifact, response, path = make_setup(tmp_path)
+    record = start_record(istari, project, response)
+
+    # platform state: raw output + answers artifact both exist...
+    istari._add_artifact(response.model_id, LLM_OUTPUT_ARTIFACT, ANSWERS_JSON)
+    istari.upload_json_artifact(
+        response.model_id, ANSWERS_ARTIFACT_NAME,
+        {"response_uuid": response.model_id,
+         "response_revision": response.latest_revision_id,
+         "vendor": response.name, "schema_version": "1.0",
+         "extracted_at": "t", "llm_model": "m", "answers": []},
+    )
+    # ...but the record still says validated (crash before save_project)
+    record.job_id = "job-x"
+    record.llm_job_id = "llmjob-x"
+    record.llm_attempts = 1
+    for state in (PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
+                  PipelineState.LLM_JOB_SUBMITTED, PipelineState.LLM_RETURNED,
+                  PipelineState.VALIDATED):
+        record.transition(state)
+    uploads_before = len(istari.upload_calls)
+
+    result = finish(istari, project, path, record, req_artifact, outputs=[])
+
+    assert result.state is PipelineState.DONE
+    assert len(istari.upload_calls) == uploads_before  # adopted, not re-uploaded
+    assert result.answers_artifact_uuid is not None
+
+
 # ------------------------------------------------------------------ rebuild
 
 def test_rebuild_from_uuid_reconstructs_equivalent_project(tmp_path: Path):
@@ -300,6 +353,51 @@ def test_rebuild_picks_highest_schema_version(tmp_path: Path):
     assert rebuilt.schema_version == "1.1"
     assert rebuilt_reqs.schema_version == "1.1"
     assert any("2 requirements artifacts" in n for n in notes)  # user shown choice (FR12)
+
+
+def test_rebuild_keeps_stale_schema_responses(tmp_path: Path):
+    """FR3/FR12: responses ingested under an earlier schema survive a rebuild,
+    stamped with their actual schema_version so they render stale (FR6)."""
+    istari, project, req_artifact, response, path = make_setup(tmp_path)
+    record = ResponseRecord(uuid=response.model_id)
+    project.responses.append(record)
+    istari.queue_llm_output(ANSWERS_JSON)
+    process_response(istari, llm_config(istari), project, path, record,
+                     req_artifact, poll_interval_s=0)
+    assert record.state is PipelineState.DONE  # ingested under schema 1.0
+
+    # FR3 re-run commits a newer schema
+    newer = RequirementsArtifact(
+        rfi_uuid=project.rfi_uuid, rfi_revision=project.rfi_revision,
+        schema_version="1.1", generated_at="t2", llm_model="m",
+        prompt_version="x", requirements=req_artifact.requirements,
+    )
+    newer_info = istari.upload_json_artifact(
+        project.rfi_uuid, "rfi-requirements.json", newer.to_dict()
+    )
+    istari.create_link(istari.get_model_info(project.rfi_uuid).latest_revision_id,
+                       newer_info.revision_id)
+
+    rebuilt, rebuilt_reqs = rebuild_from_platform(istari, project.rfi_uuid)
+
+    assert rebuilt.schema_version == "1.1"  # highest schema chosen
+    [recovered] = rebuilt.responses  # the old-schema response survived
+    assert recovered.uuid == response.model_id
+    assert recovered.schema_version == "1.0"  # stamped stale-able
+
+
+def test_rebuild_dedups_duplicate_discovery_links(tmp_path: Path):
+    istari, project, req_artifact, response, path = make_setup(tmp_path)
+    record = ResponseRecord(uuid=response.model_id)
+    project.responses.append(record)
+    istari.queue_llm_output(ANSWERS_JSON)
+    process_response(istari, llm_config(istari), project, path, record,
+                     req_artifact, poll_interval_s=0)
+    # a second machine raced the link-exists check and made a duplicate edge
+    istari.create_link(project.requirements_artifact_revision, record.revision)
+
+    rebuilt, _reqs = rebuild_from_platform(istari, project.rfi_uuid)
+    assert len(rebuilt.responses) == 1
 
 
 def test_fetch_requirements_artifact_roundtrip(tmp_path: Path):

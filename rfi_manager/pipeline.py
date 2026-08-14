@@ -400,7 +400,7 @@ def run_llm_job_validated(
         wait_for_job(
             istari, job_id,
             poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
-            progress=progress,
+            progress=progress, kind="LLM", progress_state="llm",
         )
         raw = istari.read_text_artifact(model_id, LLM_OUTPUT_ARTIFACT)
         _notify(progress, "validating", f"LLM job {job_id} output")
@@ -427,23 +427,26 @@ def wait_for_job(
     poll_interval_s: float = 3.0,
     timeout_s: float = 900.0,
     progress: ProgressCallback | None = None,
+    kind: str = "extraction",
+    progress_state: str = "extracting",
 ) -> None:
     """Poll ``get_job_state(job_id)`` until terminal; raises PipelineError on
     failure/cancel/timeout. Restart-safe: callers persist the job id before
-    calling this, so a crashed run re-polls instead of resubmitting (§3.6b)."""
+    calling this, so a crashed run re-polls instead of resubmitting (§3.6b).
+    ``kind``/``progress_state`` label the messages ("extraction"/"LLM")."""
     start = time.monotonic()
     while True:
         state = istari.get_job_state(job_id)
         if state is JobState.COMPLETED:
             return
         if state in (JobState.FAILED, JobState.CANCELED):
-            raise PipelineError(f"extraction job {job_id} ended as {state.value}")
+            raise PipelineError(f"{kind} job {job_id} ended as {state.value}")
         elapsed = time.monotonic() - start
         if elapsed > timeout_s:
             raise PipelineError(
-                f"extraction job {job_id} still {state.value} after {int(elapsed)}s"
+                f"{kind} job {job_id} still {state.value} after {int(elapsed)}s"
             )
-        _notify(progress, "extracting", f"job {job_id}: {state.value}")
+        _notify(progress, progress_state, f"job {job_id}: {state.value}")
         time.sleep(poll_interval_s)
 
 
@@ -595,7 +598,8 @@ def find_existing_answers(
     matching (response revision, schema_version), or None."""
     for info, payload in istari.list_json_artifacts(response_uuid, ANSWERS_ARTIFACT_NAME):
         if (
-            payload.get("response_revision") == response_revision
+            isinstance(payload, dict)  # a JSON artifact need not be an object
+            and payload.get("response_revision") == response_revision
             and payload.get("schema_version") == schema_version
         ):
             return info, payload
@@ -618,14 +622,39 @@ def _link_exists(istari: IstariClient, left: str, right: str) -> bool:
     )
 
 
+# One clean restart per process_response call (FR11 says restart *cleanly*,
+# singular). Without a cap, a persistent platform error — e.g. the deployed
+# module writing its output under a different artifact name — would loop
+# forever, resubmitting paid jobs every lap.
+_MAX_RESTARTS = 1
+
+
+class _RestartBudget:
+    def __init__(self) -> None:
+        self.used = 0
+
+
 def _restart_from_queued(
     record: ResponseRecord,
     project: Project,
     project_path: Path | str,
     reason: str,
     log: LogCallback | None,
+    budget: _RestartBudget,
 ) -> None:
-    """FR11: checkpoint evidence unusable -> clean restart with a log note."""
+    """FR11: checkpoint evidence unusable -> clean restart with a log note.
+    A second unusable-evidence event in the same run fails the record instead
+    of looping (and re-spending) forever."""
+    budget.used += 1
+    if budget.used > _MAX_RESTARTS:
+        _log(log, f"response {record.uuid}: {reason} — evidence unusable again "
+                  "after a clean restart; failing")
+        record.transition(
+            PipelineState.FAILED,
+            error=f"unusable checkpoint evidence after clean restart: {reason}",
+        )
+        save_project(project, project_path)
+        return
     _log(log, f"response {record.uuid}: {reason} — restarting from queued")
     record.transition(PipelineState.FAILED, error=reason)
     record.transition(PipelineState.QUEUED)
@@ -662,7 +691,7 @@ def process_response(
 
     # in-memory carry between steps within this call (never persisted)
     validated: list[Answer] | None = None
-    last_errors: list[str] | None = None
+    restarts = _RestartBudget()
 
     while record.state not in (PipelineState.DONE, PipelineState.FAILED):
         try:
@@ -699,7 +728,11 @@ def process_response(
                 _log(log, f"response {record.uuid}: extraction job {record.job_id}")
 
             elif record.state is PipelineState.JOB_SUBMITTED:
-                assert record.job_id is not None
+                if record.job_id is None:  # corrupt/hand-edited evidence (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         "no extraction job id persisted", log,
+                                         restarts)
+                    continue
                 try:
                     wait_for_job(
                         istari, record.job_id,
@@ -708,7 +741,8 @@ def process_response(
                     )
                 except IstariError as e:  # job id no longer usable (FR11)
                     _restart_from_queued(record, project, project_path,
-                                         f"job {record.job_id} unusable ({e})", log)
+                                         f"job {record.job_id} unusable ({e})", log,
+                                         restarts)
                     continue
                 record.transition(PipelineState.TEXT_RETRIEVED)
                 save_project(project, project_path)
@@ -730,17 +764,20 @@ def process_response(
                 _log(log, f"response {record.uuid}: LLM job {record.llm_job_id}")
 
             elif record.state is PipelineState.LLM_JOB_SUBMITTED:
-                assert record.llm_job_id is not None
+                if record.llm_job_id is None:  # corrupt evidence (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         "no LLM job id persisted", log, restarts)
+                    continue
                 try:
                     wait_for_job(
                         istari, record.llm_job_id,
                         poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
-                        progress=progress,
+                        progress=progress, kind="LLM", progress_state="llm",
                     )
                 except IstariError as e:  # LLM job id no longer usable (FR11)
                     _restart_from_queued(record, project, project_path,
                                          f"LLM job {record.llm_job_id} unusable ({e})",
-                                         log)
+                                         log, restarts)
                     continue
                 record.transition(PipelineState.LLM_RETURNED)
                 save_project(project, project_path)
@@ -751,14 +788,19 @@ def process_response(
                     raw = istari.read_text_artifact(record.uuid, LLM_OUTPUT_ARTIFACT)
                 except IstariError as e:
                     _restart_from_queued(record, project, project_path,
-                                         f"LLM output artifact unusable ({e})", log)
+                                         f"LLM output artifact unusable ({e})", log,
+                                         restarts)
                     continue
                 result = validate_answers(raw, requirements)
                 if not result.ok:
-                    last_errors = result.errors
                     if record.llm_attempts < 2:  # retry ONCE (§4), crash-safe
                         _log(log, f"response {record.uuid}: validation failed — "
                                   "resubmitting LLM job with validation_errors")
+                        # burn the retry budget BEFORE submitting: a crash in
+                        # this window then loses the retry rather than
+                        # granting a second one (§3.6b)
+                        record.llm_attempts += 1
+                        save_project(project, project_path)
                         text_artifact = _find_text_artifact(istari, record.uuid)
                         params = _llm_parameters(
                             llm_config, text_artifact,
@@ -769,7 +811,6 @@ def process_response(
                             record.uuid, LLM_FUNCTION_EXTRACT_RESPONSE, params,
                             llm_config.credentials,
                         )
-                        record.llm_attempts += 1
                         record.transition(PipelineState.LLM_JOB_SUBMITTED)
                         save_project(project, project_path)
                         continue
@@ -788,12 +829,29 @@ def process_response(
 
             elif record.state is PipelineState.VALIDATED:
                 _notify(progress, "uploading", record.uuid)
-                if validated is None:  # resuming: re-read the platform checkpoint
+                if validated is None:  # resuming: crash between upload and persist?
+                    # If a matching answers artifact already exists, the crash
+                    # happened AFTER the upload — adopt it instead of
+                    # uploading a duplicate (§3.6b/T6: upload not duplicated).
+                    if record.revision:
+                        existing = find_existing_answers(
+                            istari, record.uuid, record.revision, schema_version
+                        )
+                        if existing is not None:
+                            info_art, _payload = existing
+                            record.answers_artifact_uuid = info_art.artifact_id
+                            record.schema_version = schema_version
+                            record.transition(PipelineState.UPLOADED)
+                            save_project(project, project_path)
+                            _log(log, f"response {record.uuid}: adopted existing "
+                                      f"answers artifact {info_art.artifact_id}")
+                            continue
                     try:
                         raw = istari.read_text_artifact(record.uuid, LLM_OUTPUT_ARTIFACT)
                     except IstariError as e:
                         _restart_from_queued(record, project, project_path,
-                                             f"LLM output artifact unusable ({e})", log)
+                                             f"LLM output artifact unusable ({e})", log,
+                                             restarts)
                         continue
                     result = validate_answers(raw, requirements)
                     if not result.ok:
@@ -827,13 +885,18 @@ def process_response(
                           f"{info_art.artifact_id} uploaded")
 
             elif record.state is PipelineState.UPLOADED:
-                assert record.answers_artifact_uuid is not None
+                if record.answers_artifact_uuid is None:  # corrupt evidence (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         "no answers artifact id persisted", log,
+                                         restarts)
+                    continue
                 answers_rev = _find_answers_revision(
                     istari, record.uuid, record.answers_artifact_uuid
                 )
                 if answers_rev is None:  # upload evidence unusable (FR11)
                     _restart_from_queued(record, project, project_path,
-                                         "uploaded answers artifact not found", log)
+                                         "uploaded answers artifact not found", log,
+                                         restarts)
                     continue
                 # provenance: response file revision -> answers artifact revision
                 if record.revision and not _link_exists(istari, record.revision, answers_rev):
@@ -875,7 +938,7 @@ def fetch_requirements_artifact(
     for info, payload in istari.list_json_artifacts(
         project.rfi_uuid, REQUIREMENTS_ARTIFACT_NAME
     ):
-        if info.artifact_id == project.requirements_artifact_uuid:
+        if isinstance(payload, dict) and info.artifact_id == project.requirements_artifact_uuid:
             if project.requirements_artifact_revision is None:
                 project.requirements_artifact_revision = info.revision_id
             return RequirementsArtifact.from_dict(payload)
@@ -893,7 +956,7 @@ def fetch_answers_artifact(
     if record.answers_artifact_uuid is None:
         raise PipelineError(f"response {record.uuid} has no answers artifact")
     for info, payload in istari.list_json_artifacts(record.uuid, ANSWERS_ARTIFACT_NAME):
-        if info.artifact_id == record.answers_artifact_uuid:
+        if isinstance(payload, dict) and info.artifact_id == record.answers_artifact_uuid:
             return AnswersArtifact.from_dict(payload)
     raise PipelineError(
         f"answers artifact {record.answers_artifact_uuid} not found on "
@@ -1014,6 +1077,11 @@ def rebuild_from_platform(
         raise PipelineError(f"RFI {rfi_uuid} has no {REQUIREMENTS_ARTIFACT_NAME} artifact")
     if len(candidates) > 1:
         _log(log, f"RFI {rfi_uuid}: {len(candidates)} requirements artifacts found")
+    candidates = [(i, p) for i, p in candidates if isinstance(p, dict)]
+    if not candidates:
+        raise PipelineError(
+            f"RFI {rfi_uuid} has no readable {REQUIREMENTS_ARTIFACT_NAME} artifact"
+        )
     chosen_info, chosen_payload = max(
         candidates, key=lambda c: _schema_sort_key(c[1].get("schema_version", ""))
     )
@@ -1029,32 +1097,52 @@ def rebuild_from_platform(
         schema_version=requirements_artifact.schema_version,
     )
 
-    for link in istari.list_links(chosen_info.revision_id):
-        if link.left_revision_id != chosen_info.revision_id:
-            continue  # the rfi->requirements edge, not a discovery edge
-        response_revision = link.right_revision_id
-        try:
-            response_uuid = istari.model_id_for_revision(response_revision)
-        except IstariError as e:
-            _log(log, f"skipping linked revision {response_revision}: {e}")
-            continue
-        existing = find_existing_answers(
-            istari, response_uuid, response_revision,
-            requirements_artifact.schema_version,
-        )
-        if existing is None:
-            _log(log, f"response {response_uuid}: no matching answers artifact; skipped")
-            continue
-        info_art, payload = existing
-        record = ResponseRecord(
-            uuid=response_uuid,
-            revision=response_revision,
-            state=PipelineState.DONE,
-            answers_artifact_uuid=info_art.artifact_id,
-            schema_version=payload.get("schema_version"),
-            vendor=payload.get("vendor"),
-        )
-        project.responses.append(record)
-        _log(log, f"recovered response {response_uuid} "
-                  f"(answers artifact {info_art.artifact_id})")
+    # Traverse discovery links from EVERY requirements artifact revision, not
+    # just the chosen one: responses ingested under an earlier schema were
+    # linked from that schema's artifact and must survive a rebuild — they
+    # render flagged stale (FR3/FR6), matching what a machine with a local
+    # project file shows (§3.6c convergence).
+    seen: set[tuple[str, str]] = set()
+    for cand_info, _cand_payload in candidates:
+        for link in istari.list_links(cand_info.revision_id):
+            if link.left_revision_id != cand_info.revision_id:
+                continue  # the rfi->requirements edge, not a discovery edge
+            response_revision = link.right_revision_id
+            try:
+                response_uuid = istari.model_id_for_revision(response_revision)
+            except IstariError as e:
+                _log(log, f"skipping linked revision {response_revision}: {e}")
+                continue
+            if (response_uuid, response_revision) in seen:
+                continue  # duplicate discovery edges must not duplicate rows
+            # newest answers artifact for this response revision, any schema —
+            # the actual schema_version is stamped so staleness renders right
+            match = next(
+                (
+                    (info, payload)
+                    for info, payload in istari.list_json_artifacts(
+                        response_uuid, ANSWERS_ARTIFACT_NAME
+                    )
+                    if isinstance(payload, dict)
+                    and payload.get("response_revision") == response_revision
+                ),
+                None,
+            )
+            if match is None:
+                _log(log, f"response {response_uuid}: no matching answers artifact; skipped")
+                continue
+            seen.add((response_uuid, response_revision))
+            info_art, payload = match
+            record = ResponseRecord(
+                uuid=response_uuid,
+                revision=response_revision,
+                state=PipelineState.DONE,
+                answers_artifact_uuid=info_art.artifact_id,
+                schema_version=payload.get("schema_version"),
+                vendor=payload.get("vendor"),
+            )
+            project.responses.append(record)
+            _log(log, f"recovered response {response_uuid} "
+                      f"(answers artifact {info_art.artifact_id}, "
+                      f"schema v{payload.get('schema_version')})")
     return project, requirements_artifact
