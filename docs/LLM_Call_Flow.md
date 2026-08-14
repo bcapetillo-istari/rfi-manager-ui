@@ -49,11 +49,15 @@ Why two functions rather than one generic proxy:
 1. **UI initiates the LLM call.**
    - After a PDF extraction job completes (its `text.txt` artifact is on the
      platform), the UI submits the appropriate LLM job via the SDK
-     (`client.add_job(...)`), attached to the model being analyzed (the RFI
-     for stage 1, the response for stage 2).
+     (`client.add_job(...)`), **attached to the extracted-text artifact
+     itself** (verified live 2026-08-14 — attaching to the RFI/response model
+     stages the source PDF as the function's input, not the extracted text).
    - Parameters are small (no document text): revision references to the
-     extracted-text artifact, plus — for `extract_response_requirements` —
-     the committed requirements as JSON.
+     extracted-text artifact (`source_resource_id`/`source_revision_id`), the
+     RFI/response resource the text came from (`origin_resource_id`, for
+     provenance/in case the function wants to write output back there), plus
+     — for `extract_response_requirements` — the committed requirements as
+     JSON.
    - Auth: `auth_bindings=[NewCredentialBinding(input_name=...,
      credential_id=...)]` binds the user's Linked Accounts (Istari token +
      LLM provider key). The UI populates a **credential dropdown** from
@@ -188,16 +192,38 @@ Agent alongside the Smart Diff module).
   scaffold entrypoint contract, token-standard credential files, revision
   download via `V3Client.get_resource_revision` + `read_contents`.
 
+## Resolved against the live deployment (2026-08-14)
+
+- **Auth bindings**: the deployed functions declare no `istari_auth`
+  auth_info input — binding one returns 400 "Credential Binding Mismatch".
+  Only `llm_auth` is bound (`LLM_FUNCTION_NEEDS_ISTARI_AUTH = False` in
+  `istari_adapter.py`; flip if the manifest adds one).
+- **Job attachment target**: LLM jobs must attach to the extracted-text
+  artifact (`text.txt`), not the RFI/response model — attaching to the model
+  stages the source PDF as the function's input instead of the extracted
+  text. The client reads the raw-output artifact back from the text artifact
+  first, falling back to the origin RFI/response resource (in case the
+  deployed function instead writes output back to the origin) — see
+  `_read_llm_output` in `pipeline.py`.
+- **Function execute permission** is per-user on the platform (functions
+  have their own ACL, separate from module/registry access) — a 403
+  "Permission Denied: ... DOES NOT have 'execute' permissions to
+  functionversion:..." means the calling user needs to be granted execute
+  on that function version.
+
 ## Open questions
 
 1. `tool_name`/`tool_version`/OS values and output artifact names — finalize
-   when the `@istari_utils:rfi_manager` manifest exists (parameter names
-   above are proposals to mirror in that manifest).
-2. `@token:llm` credential type — confirm the auth integration exists on the
-   target instance (Smart Diff's manifest already declares it).
-3. Retry-once cost: a validation failure means a second LLM job (queue +
+   when the `@istari_utils:rfi_manager` manifest is confirmed complete
+   (parameter names above are proposals to mirror in that manifest;
+   `llm_output.json` unconfirmed as the actual output artifact name).
+2. Retry-once cost: a validation failure means a second LLM job (queue +
    poll overhead ×2 worst case). Accepted?
-4. Review-screen edits + Stage 2: the committed `rfi-requirements.json` is
+3. Review-screen edits + Stage 2: the committed `rfi-requirements.json` is
    the schema of record passed to `extract_response_requirements` — i.e. the
    platform artifact, not any local state. (This is the plan; noting it so
    the module repo reads the same contract.)
+4. Zitadel PAT deprecation: the registry warns "Zitadel personal access
+   tokens are deprecated; migrate to key-pair authentication" — the
+   connection bar (Registry URL + PAT) will need a key-pair auth path
+   eventually.

@@ -53,12 +53,16 @@ def test_stage1_extraction_end_to_end():
     assert result.rfi_revision_id == rfi.latest_revision_id
     assert result.llm_model == "claude:claude-opus-5"
 
-    # the LLM job referenced the extracted-text revision (never raw text)
+    # the LLM job is attached to the extracted-text ARTIFACT — not the RFI
+    # model — so the platform stages text.txt, not the source PDF (never
+    # raw text either way: only revision references travel in parameters)
     [llm_call] = istari.llm_calls
     assert llm_call["function"] == LLM_FUNCTION_EXTRACT_RFI
-    assert llm_call["model_id"] == rfi.model_id
     text_artifact = istari.find_artifact(rfi.model_id, "text.txt")
+    assert llm_call["model_id"] == text_artifact.artifact_id
+    assert llm_call["parameters"]["source_resource_id"] == text_artifact.artifact_id
     assert llm_call["parameters"]["source_revision_id"] == text_artifact.revision_id
+    assert llm_call["parameters"]["origin_resource_id"] == rfi.model_id
     assert llm_call["parameters"]["provider"] == "claude"
     assert "RFI DOCUMENT TEXT" not in json.dumps(llm_call["parameters"])
 

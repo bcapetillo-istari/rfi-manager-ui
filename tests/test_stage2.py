@@ -91,14 +91,18 @@ def test_stage2_end_to_end_provenance(tmp_path: Path):
     assert record.schema_version == "1.0"
     assert record.llm_attempts == 1
 
-    # T3: LLM job contract — attached to the response, references the text
-    # revision, carries every committed requirement id, binds credentials by id
+    # T3: LLM job contract — attached to the extracted-text ARTIFACT (not the
+    # response model, so the platform stages text.txt, not the PDF), origin
+    # resource passed for provenance, carries every committed requirement id,
+    # binds credentials by id
     [llm_call] = istari.llm_calls
     assert llm_call["function"] == LLM_FUNCTION_EXTRACT_RESPONSE
-    assert llm_call["model_id"] == response.model_id
-    params = llm_call["parameters"]
     text_artifact = istari.find_artifact(response.model_id, "text.txt")
+    assert llm_call["model_id"] == text_artifact.artifact_id
+    params = llm_call["parameters"]
+    assert params["source_resource_id"] == text_artifact.artifact_id
     assert params["source_revision_id"] == text_artifact.revision_id
+    assert params["origin_resource_id"] == response.model_id
     req_ids = [r["id"] for r in params["requirements_json"]]
     assert req_ids == ["C-01", "C-02"]
     assert params["requirements_json"][0]["options"] == ["Compliant", "Partial"]

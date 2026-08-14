@@ -1,5 +1,29 @@
 # PROGRESS
 
+## First live run fixes (2026-08-14)
+
+Live testing against the deployed `@istari_utils:rfi_manager` module
+surfaced two real contract mismatches, both fixed:
+
+1. **403 execute permission** (platform-side, not code) — the calling user
+   needed 'execute' granted on the function version; resolved by the user.
+2. **400 Credential Binding Mismatch** — the functions declare no
+   `istari_auth` auth_info input; only `llm_auth` is bound now
+   (`LLM_FUNCTION_NEEDS_ISTARI_AUTH` flag in `istari_adapter.py`).
+3. **Wrong job input** — LLM jobs were attached to the RFI/response model,
+   which stages the source PDF as the function's input. Fixed: jobs now
+   attach to the extracted-text artifact (`text.txt`) itself, so that gets
+   staged instead. `origin_resource_id` added as a parameter for provenance.
+   Output read falls back from the text artifact to the origin resource
+   (unconfirmed which one the deployed function writes to — see
+   docs/LLM_Call_Flow.md open questions).
+4. Added full LLM job submission/read logging (function, attached resource,
+   origin resource, parameters, credential ids, and where the output was
+   found) to the session log, per request.
+
+pytest: 96 passed; smoke: 9/9. Awaiting next live run to confirm the
+attachment fix and the output-location assumption.
+
 ## MVP verification pass (done, 2026-08-14)
 
 Two adversarial code reviews (pipeline core; UI + tests) plus an 8-scenario

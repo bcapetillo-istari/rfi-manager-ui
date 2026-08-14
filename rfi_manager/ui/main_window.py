@@ -356,6 +356,7 @@ class MainWindow(QMainWindow):
             poll_interval_s=self._poll_interval_s,
             job_timeout_s=self._job_timeout_s,
             send_progress=True,
+            send_log=True,
         )
         worker.signals.progress.connect(self._on_progress)
         worker.signals.finished.connect(self._on_extraction_done)

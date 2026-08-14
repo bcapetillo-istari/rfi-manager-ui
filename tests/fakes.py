@@ -119,8 +119,16 @@ class FakeIstari:
             artifact_id=artifact_id, name=name, revision_id=f"{artifact_id}-rev-1"
         )
         self.revision_owner[info.revision_id] = artifact_id
-        self.artifacts[model_id].append((info, payload))
+        self.artifacts.setdefault(model_id, []).append((info, payload))
+        # An artifact is itself an addressable resource — a job can attach to
+        # it (LLM jobs attach to the text.txt artifact, not the parent model)
+        # and further artifacts (e.g. llm_output.json) can be uploaded onto it.
+        self.artifacts.setdefault(artifact_id, [])
         return info
+
+    def _resource_exists(self, resource_id: str) -> bool:
+        """A resource is any model OR artifact id jobs/reads can target."""
+        return resource_id in self.artifacts
 
     def _complete(self, job_id: str) -> None:
         job = self.jobs[job_id]
@@ -172,7 +180,7 @@ class FakeIstari:
         parameters: dict[str, Any],
         credentials: CredentialSelection,
     ) -> str:
-        if model_id not in self.models:
+        if not self._resource_exists(model_id):
             raise IstariError(f"cannot submit LLM job for {model_id}: not found")
         job_id = f"llmjob-{next(self._seq)}"
         self.jobs[job_id] = {"model_id": model_id, "state": JobState.RUNNING,
@@ -195,7 +203,7 @@ class FakeIstari:
         return job["state"]
 
     def read_text_artifact(self, model_id: str, name: str) -> str:
-        if model_id not in self.models:
+        if not self._resource_exists(model_id):
             raise IstariError(f"cannot fetch model {model_id}: not found")
         for info, payload in reversed(self.artifacts[model_id]):
             if info.name == name:
@@ -203,7 +211,7 @@ class FakeIstari:
         raise IstariError(f"model {model_id} has no {name} artifact — did the job complete?")
 
     def find_artifact(self, model_id: str, name: str) -> ArtifactInfo | None:
-        if model_id not in self.models:
+        if not self._resource_exists(model_id):
             raise IstariError(f"cannot fetch model {model_id}: not found")
         for info, _payload in reversed(self.artifacts[model_id]):
             if info.name == name:
