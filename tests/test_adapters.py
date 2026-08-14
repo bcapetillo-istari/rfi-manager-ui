@@ -13,6 +13,7 @@ from tests.fakes import FakeIstari
 
 ADAPTER_METHODS = [
     "get_model_info",
+    "model_id_for_revision",
     "submit_extraction_job",
     "get_job_state",
     "get_extracted_text",

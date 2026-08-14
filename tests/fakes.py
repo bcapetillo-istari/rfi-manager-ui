@@ -50,9 +50,11 @@ class FakeIstari:
         self.artifacts: dict[str, list[tuple[ArtifactInfo, dict[str, Any]]]] = {}
         self.links: list[LinkInfo] = []
         self.auto_complete_jobs = True
+        self.revision_owner: dict[str, str] = {}  # revision_id -> resource id
         # call log for assertions (T2: correct linkage/provenance args)
         self.upload_calls: list[dict[str, Any]] = []
         self.link_calls: list[tuple[str, str]] = []
+        self.job_submissions: list[str] = []  # model ids, to assert no resubmits
 
     # ------------------------------------------------------- test helpers
 
@@ -69,7 +71,14 @@ class FakeIstari:
         self.models[model_id] = info
         self.extracted_text[model_id] = text
         self.artifacts[model_id] = []
+        for rev_id in rev_ids:
+            self.revision_owner[rev_id] = model_id
         return info
+
+    def model_id_for_revision(self, revision_id: str) -> str:
+        if revision_id not in self.revision_owner:
+            raise IstariError(f"cannot resolve revision {revision_id}: not found")
+        return self.revision_owner[revision_id]
 
     def complete_job(self, job_id: str) -> None:
         self.jobs[job_id]["state"] = JobState.COMPLETED
@@ -89,6 +98,7 @@ class FakeIstari:
             raise IstariError(f"cannot submit extraction job for {model_id}: not found")
         job_id = f"job-{next(self._seq)}"
         self.jobs[job_id] = {"model_id": model_id, "state": JobState.RUNNING}
+        self.job_submissions.append(model_id)
         return job_id
 
     def get_job_state(self, job_id: str) -> JobState:
@@ -119,6 +129,7 @@ class FakeIstari:
         info = ArtifactInfo(
             artifact_id=artifact_id, name=name, revision_id=f"{artifact_id}-rev-1"
         )
+        self.revision_owner[info.revision_id] = artifact_id
         self.artifacts[model_id].append((info, payload))
         self.upload_calls.append(
             {"model_id": model_id, "name": name, "payload": payload,
