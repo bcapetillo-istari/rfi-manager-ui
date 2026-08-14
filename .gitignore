@@ -1,0 +1,18 @@
+# Secrets / local config — never commit
+config.toml
+.env
+
+# Local project files and caches
+*.rfiproj
+.llm_cache/
+reference/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
