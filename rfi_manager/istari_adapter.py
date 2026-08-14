@@ -88,11 +88,13 @@ class CredentialInfo:
 
 @dataclass(frozen=True)
 class CredentialSelection:
-    """The two credentials every LLM job binds (by reference, never by value):
-    the agent-side Istari token and the LLM provider key."""
+    """Credentials bound to LLM jobs (by reference, never by value). The LLM
+    provider key is always required; the agent-side Istari token only when
+    the deployed manifest declares an istari_auth input
+    (LLM_FUNCTION_NEEDS_ISTARI_AUTH)."""
 
-    istari_credential_id: str
     llm_credential_id: str
+    istari_credential_id: str | None = None
 
 
 # The Istari extraction function produces text.txt among its artifacts
@@ -119,6 +121,10 @@ LLM_OUTPUT_ARTIFACT = "llm_output.json"
 # auth_info input names in the module manifest
 LLM_AUTH_INPUT = "llm_auth"
 ISTARI_AUTH_INPUT = "istari_auth"
+# The deployed functions declare no istari_auth auth_info input (verified
+# live 2026-08-14: binding it returns 400 "Credential Binding Mismatch").
+# Flip this on if the manifest ever adds one.
+LLM_FUNCTION_NEEDS_ISTARI_AUTH = False
 
 # Relationship type used to link uploaded artifacts to their source revision.
 _LINK_TYPE_NAME = "produces"
@@ -235,14 +241,17 @@ class IstariAdapter:
 
         auth_bindings = [
             NewCredentialBinding(
-                input_name=ISTARI_AUTH_INPUT,
-                credential_id=credentials.istari_credential_id,
-            ),
-            NewCredentialBinding(
                 input_name=LLM_AUTH_INPUT,
                 credential_id=credentials.llm_credential_id,
             ),
         ]
+        if LLM_FUNCTION_NEEDS_ISTARI_AUTH and credentials.istari_credential_id:
+            auth_bindings.append(
+                NewCredentialBinding(
+                    input_name=ISTARI_AUTH_INPUT,
+                    credential_id=credentials.istari_credential_id,
+                )
+            )
         try:
             job = self._client.add_job(
                 model_id,

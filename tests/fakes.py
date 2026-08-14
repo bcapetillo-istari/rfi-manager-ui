@@ -100,8 +100,8 @@ class FakeIstari:
             self.add_credential("istari-pat", auth_type="istari")
             self.add_credential("llm-key", auth_type="llm")
         return CredentialSelection(
-            istari_credential_id=self.credentials[0].credential_id,
             llm_credential_id=self.credentials[1].credential_id,
+            istari_credential_id=self.credentials[0].credential_id,
         )
 
     def queue_llm_output(self, raw: str) -> None:

@@ -27,7 +27,11 @@ from PySide6.QtWidgets import (
 
 from .. import pipeline
 from ..config import IstariConfig
-from ..istari_adapter import CredentialInfo, CredentialSelection
+from ..istari_adapter import (
+    LLM_FUNCTION_NEEDS_ISTARI_AUTH,
+    CredentialInfo,
+    CredentialSelection,
+)
 from ..models import (
     RESUMABLE_STATES,
     PipelineState,
@@ -276,20 +280,22 @@ class MainWindow(QMainWindow):
 
     def _llm_job_config(self) -> LLMJobConfig | None:
         """Selected credentials + configured provider/model defaults; None
-        (with a warning) when no credentials are selected."""
+        (with a warning) when a required credential is not selected."""
         istari_id = self.istari_cred_combo.currentData()
         llm_id = self.llm_cred_combo.currentData()
-        if not istari_id or not llm_id:
+        missing_istari = LLM_FUNCTION_NEEDS_ISTARI_AUTH and not istari_id
+        if not llm_id or missing_istari:
             QMessageBox.warning(
                 self,
                 "No credentials",
-                "Select an Istari token and an LLM token in the credentials "
-                "bar first (Linked Accounts on the platform).",
+                "Select an LLM token"
+                + (" and an Istari token" if LLM_FUNCTION_NEEDS_ISTARI_AUTH else "")
+                + " in the credentials bar first (Linked Accounts on the platform).",
             )
             return None
         return LLMJobConfig(
             credentials=CredentialSelection(
-                istari_credential_id=istari_id, llm_credential_id=llm_id
+                llm_credential_id=llm_id, istari_credential_id=istari_id
             ),
             provider=self._llm_provider,
             model=self._llm_model,
