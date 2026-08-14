@@ -1,8 +1,11 @@
 # RFI Manager configuration. Copy to config.toml (git-ignored) and edit.
 #
-# SECRETS ARE NEVER READ FROM THIS FILE. Set them in the environment:
-#   export ISTARI_TOKEN=...        # Istari platform token
-#   export RFI_LLM_API_KEY=...     # LLM provider API key
+# The only client-side secret is the Istari platform token:
+#   export ISTARI_TOKEN=...
+#
+# There is NO LLM API key here (or anywhere client-side): LLM calls run as
+# Istari Agent jobs, and LLM credentials are Istari Linked Accounts selected
+# in the app's credential picker.
 
 [istari]
 base_url = "https://your-instance.istaridigital.com"
@@ -12,9 +15,7 @@ job_timeout_s = 900.0
 retries = 2
 
 [llm]
-provider = "anthropic"          # "anthropic" | "openai_compatible"
-model = "claude-opus-5"
-# endpoint = "https://enclave-gateway.example/v1/chat/completions"  # openai_compatible only
-request_timeout_s = 300.0
-retries = 2
-max_tokens = 8192
+# Optional defaults forwarded as LLM-job parameters; leave unset to use the
+# @istari_utils:rfi_manager module's defaults.
+# provider = "claude"
+# model = "claude-opus-5"

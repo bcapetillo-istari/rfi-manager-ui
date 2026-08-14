@@ -76,13 +76,49 @@ class LinkInfo:
     right_revision_id: str
 
 
+@dataclass(frozen=True)
+class CredentialInfo:
+    """A Linked Account (stored credential) selectable in the UI."""
+
+    credential_id: str
+    name: str
+    auth_type: str | None = None
+    account_identity: str | None = None
+
+
+@dataclass(frozen=True)
+class CredentialSelection:
+    """The two credentials every LLM job binds (by reference, never by value):
+    the agent-side Istari token and the LLM provider key."""
+
+    istari_credential_id: str
+    llm_credential_id: str
+
+
 # The Istari extraction function produces text.txt among its artifacts
 # (verified against the extract-pdf reference notebook).
 _EXTRACT_FUNCTION = "@istari:extract"
 _EXTRACT_TOOL = "open_pdf"
 _EXTRACT_TOOL_VERSION = "1.0.0"
 _EXTRACT_OS = "Ubuntu 22.04"
-_EXTRACT_TEXT_ARTIFACT = "text.txt"
+EXTRACT_TEXT_ARTIFACT = "text.txt"
+_EXTRACT_TEXT_ARTIFACT = EXTRACT_TEXT_ARTIFACT  # back-compat alias
+
+# ---------------------------------------------------------------------------
+# @istari_utils:rfi_manager module contract (docs/LLM_Call_Flow.md).
+# The module is not deployed yet; every identifier the UI depends on lives
+# here so delivery is a constants change. tool_name/tool_version/OS are None
+# until the deployed manifest fixes them.
+# ---------------------------------------------------------------------------
+LLM_FUNCTION_EXTRACT_RFI = "@istari_utils:extract_rfi_requirements"
+LLM_FUNCTION_EXTRACT_RESPONSE = "@istari_utils:extract_response_requirements"
+LLM_TOOL_NAME: str | None = None
+LLM_TOOL_VERSION: str | None = None
+LLM_OS: str | None = None
+LLM_OUTPUT_ARTIFACT = "llm_output.json"
+# auth_info input names in the module manifest
+LLM_AUTH_INPUT = "llm_auth"
+ISTARI_AUTH_INPUT = "istari_auth"
 
 # Relationship type used to link uploaded artifacts to their source revision.
 _LINK_TYPE_NAME = "produces"
@@ -161,6 +197,63 @@ class IstariAdapter:
             raise IstariError(f"cannot submit extraction job for {model_id}: {e}") from e
         return job.id
 
+    def submit_llm_job(
+        self,
+        model_id: str,
+        function: str,
+        parameters: dict[str, Any],
+        credentials: CredentialSelection,
+    ) -> str:
+        """``client.add_job(model_id, function, parameters=...,
+        auth_bindings=[NewCredentialBinding(...)])`` -> job id.
+
+        Submits one of the @istari_utils:rfi_manager LLM functions. The
+        selected Linked Accounts are bound by credential id — no key material
+        ever enters parameters (PRD §3.3/§3.4).
+        """
+        from istari_digital_client import NewCredentialBinding
+
+        auth_bindings = [
+            NewCredentialBinding(
+                input_name=ISTARI_AUTH_INPUT,
+                credential_id=credentials.istari_credential_id,
+            ),
+            NewCredentialBinding(
+                input_name=LLM_AUTH_INPUT,
+                credential_id=credentials.llm_credential_id,
+            ),
+        ]
+        try:
+            job = self._client.add_job(
+                model_id,
+                function=function,
+                tool_name=LLM_TOOL_NAME,
+                tool_version=LLM_TOOL_VERSION,
+                operating_system=LLM_OS,
+                parameters=parameters,
+                auth_bindings=auth_bindings,
+            )
+        except Exception as e:
+            raise IstariError(f"cannot submit LLM job ({function}) for {model_id}: {e}") from e
+        return job.id
+
+    def list_credentials(self) -> list[CredentialInfo]:
+        """``client.list_credentials()`` -> Linked Accounts the user can bind
+        to LLM jobs (feeds the UI credential pickers)."""
+        try:
+            stored = self._client.list_credentials()
+        except Exception as e:
+            raise IstariError(f"cannot list credentials: {e}") from e
+        return [
+            CredentialInfo(
+                credential_id=c.id,
+                name=c.name or c.id,
+                auth_type=getattr(c, "auth_type", None),
+                account_identity=getattr(c, "account_identity", None),
+            )
+            for c in stored or []
+        ]
+
     def get_job_state(self, job_id: str) -> JobState:
         """``client.get_job(job_id)`` -> mapped JobState. Restart-safe: the
         pipeline re-polls a persisted job id instead of resubmitting (§3.6b).
@@ -190,21 +283,36 @@ class IstariAdapter:
             raise IstariError(f"cannot fetch model {model_id}: {e}") from e
         return model.artifacts or []
 
-    def get_extracted_text(self, model_id: str) -> str:
-        """Read the extraction function's ``text.txt`` artifact via
-        ``artifact.read_text()``. Iterates ``reversed(model.artifacts)`` so a
-        re-extracted model yields the most recent text (artifacts cannot be
-        listed per job — known SDK gap)."""
+    def read_text_artifact(self, model_id: str, name: str) -> str:
+        """Read the newest artifact named ``name`` via ``artifact.read_text()``.
+        Iterates ``reversed(model.artifacts)`` so re-runs yield the most
+        recent output (artifacts cannot be listed per job — known SDK gap)."""
         for artifact in reversed(list(self._iter_artifacts(model_id))):
-            if _artifact_name(artifact) == _EXTRACT_TEXT_ARTIFACT:
+            if _artifact_name(artifact) == name:
                 try:
                     return artifact.read_text()
                 except Exception as e:
-                    raise IstariError(f"cannot read {_EXTRACT_TEXT_ARTIFACT}: {e}") from e
+                    raise IstariError(f"cannot read {name}: {e}") from e
         raise IstariError(
-            f"model {model_id} has no {_EXTRACT_TEXT_ARTIFACT} artifact — "
-            "did the extraction job complete?"
+            f"model {model_id} has no {name} artifact — did the job complete?"
         )
+
+    def find_artifact(self, model_id: str, name: str) -> ArtifactInfo | None:
+        """Newest artifact named ``name`` as pointer info (or None). Used to
+        locate the extracted-text revision an LLM job should reference."""
+        for artifact in reversed(list(self._iter_artifacts(model_id))):
+            if _artifact_name(artifact) != name:
+                continue
+            revisions = artifact.file.revisions or []
+            if revisions:
+                return ArtifactInfo(
+                    artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
+                )
+        return None
+
+    def get_extracted_text(self, model_id: str) -> str:
+        """The extraction function's ``text.txt`` content (newest)."""
+        return self.read_text_artifact(model_id, EXTRACT_TEXT_ARTIFACT)
 
     def upload_json_artifact(
         self,

@@ -8,15 +8,25 @@ import inspect
 
 import pytest
 
-from rfi_manager.istari_adapter import IstariAdapter, IstariError, JobState
+from rfi_manager.istari_adapter import (
+    LLM_FUNCTION_EXTRACT_RFI,
+    LLM_OUTPUT_ARTIFACT,
+    IstariAdapter,
+    IstariError,
+    JobState,
+)
 from tests.fakes import FakeIstari
 
 ADAPTER_METHODS = [
     "get_model_info",
     "model_id_for_revision",
     "submit_extraction_job",
+    "submit_llm_job",
+    "list_credentials",
     "get_job_state",
     "get_extracted_text",
+    "read_text_artifact",
+    "find_artifact",
     "upload_json_artifact",
     "list_json_artifacts",
     "create_link",
@@ -37,6 +47,22 @@ def test_fake_extraction_flow():
     job_id = fake.submit_extraction_job(model.model_id)
     assert fake.get_job_state(job_id) is JobState.COMPLETED  # auto-complete
     assert fake.get_extracted_text(model.model_id) == "RFI TEXT"
+    assert fake.find_artifact(model.model_id, "text.txt") is not None
+
+
+def test_fake_llm_job_flow():
+    fake = FakeIstari()
+    model = fake.add_model("rfi.pdf", text="T")
+    creds = fake.default_credentials()
+    fake.queue_llm_output('[{"id": "C-01"}]')
+    job_id = fake.submit_llm_job(
+        model.model_id, LLM_FUNCTION_EXTRACT_RFI, {"provider": "claude"}, creds
+    )
+    assert fake.get_job_state(job_id) is JobState.COMPLETED
+    assert fake.read_text_artifact(model.model_id, LLM_OUTPUT_ARTIFACT) == '[{"id": "C-01"}]'
+    [call] = fake.llm_calls
+    assert call["function"] == LLM_FUNCTION_EXTRACT_RFI
+    assert call["credentials"] is creds
 
 
 def test_fake_job_polling_without_autocomplete():

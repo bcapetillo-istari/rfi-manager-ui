@@ -6,14 +6,16 @@ import json
 
 import pytest
 
-from rfi_manager.models import NOT_FOUND, Requirement
+from rfi_manager.istari_adapter import LLM_FUNCTION_EXTRACT_RESPONSE
 from rfi_manager.pipeline import (
-    call_llm_validated,
+    LLMJobConfig,
+    run_llm_job_validated,
     strip_fences,
     validate_answers,
     validate_requirements,
 )
-from tests.fakes import FakeLLM
+from rfi_manager.models import NOT_FOUND, Requirement
+from tests.fakes import FakeIstari
 
 REQS = [
     Requirement(id="C-01", label="MOSA compliance", description="MOSA?", type="enum",
@@ -218,28 +220,48 @@ def test_long_label_is_warning():
     assert any("longer than 4 words" in w for w in result.warnings)
 
 
-# ---------------------------------------------------------------- retry-once
+# ------------------------------------------- retry-once (LLM jobs, PRD §4)
+
+def run_job(istari, model_id, config=None):
+    return run_llm_job_validated(
+        istari, model_id, LLM_FUNCTION_EXTRACT_RESPONSE,
+        config or LLMJobConfig(credentials=istari.default_credentials()),
+        lambda t: validate_answers(t, REQS),
+        poll_interval_s=0,
+    )
+
 
 def test_retry_once_on_invalid_then_valid():
-    llm = FakeLLM(["totally broken", answers_json()])
-    result, raw = call_llm_validated(llm, "PROMPT-B", lambda t: validate_answers(t, REQS))
+    istari = FakeIstari()
+    model = istari.add_model("resp.pdf", text="T")
+    istari.queue_llm_output("totally broken")
+    istari.queue_llm_output(answers_json())
+
+    result, raw = run_job(istari, model.model_id)
+
     assert result.ok
-    assert len(llm.calls) == 2
-    # retry prompt carries the error list appended to the original prompt
-    assert llm.calls[1][1].startswith("PROMPT-B")
-    assert "failed validation" in llm.calls[1][1]
     assert raw == answers_json()
+    assert len(istari.llm_calls) == 2
+    # the retry job carries the error list as the validation_errors parameter
+    assert "validation_errors" not in istari.llm_calls[0]["parameters"]
+    retry_errors = istari.llm_calls[1]["parameters"]["validation_errors"]
+    assert any("not valid JSON" in e for e in retry_errors)
 
 
 def test_retry_once_still_invalid_stays_failed():
-    llm = FakeLLM(["broken", "still broken"])
-    result, _raw = call_llm_validated(llm, "P", lambda t: validate_answers(t, REQS))
+    istari = FakeIstari()
+    model = istari.add_model("resp.pdf", text="T")
+    istari.queue_llm_output("broken")
+    istari.queue_llm_output("still broken")
+    result, _raw = run_job(istari, model.model_id)
     assert not result.ok
-    assert len(llm.calls) == 2  # exactly one retry, never more
+    assert len(istari.llm_calls) == 2  # exactly one retry, never more
 
 
 def test_no_retry_when_first_response_valid():
-    llm = FakeLLM([answers_json()])
-    result, _raw = call_llm_validated(llm, "P", lambda t: validate_answers(t, REQS))
+    istari = FakeIstari()
+    model = istari.add_model("resp.pdf", text="T")
+    istari.queue_llm_output(answers_json())
+    result, _raw = run_job(istari, model.model_id)
     assert result.ok
-    assert len(llm.calls) == 1
+    assert len(istari.llm_calls) == 1
