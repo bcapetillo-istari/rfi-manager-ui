@@ -9,9 +9,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QDockWidget,
     QFileDialog,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -20,10 +22,11 @@ from PySide6.QtWidgets import (
 )
 
 from .. import pipeline
+from ..istari_adapter import CredentialInfo, CredentialSelection
 from ..models import PipelineState, Project, Requirement, ResponseRecord
 from ..models import RequirementsArtifact
 from ..persistence import load_project, save_project
-from ..pipeline import Stage1Result
+from ..pipeline import LLMJobConfig, Stage1Result
 from .comparison_page import ComparisonPage
 from .review_screen import ReviewScreen
 from .stage1_page import Stage1Page
@@ -46,8 +49,9 @@ class MainWindow(QMainWindow):
     def __init__(
         self,
         istari,
-        llm,
         *,
+        llm_provider: str | None = None,
+        llm_model: str | None = None,
         project_dir: Path | None = None,
         poll_interval_s: float = 3.0,
         job_timeout_s: float = 900.0,
@@ -57,7 +61,8 @@ class MainWindow(QMainWindow):
         self.resize(1200, 750)
 
         self._istari = istari
-        self._llm = llm
+        self._llm_provider = llm_provider
+        self._llm_model = llm_model
         self._project_dir = project_dir
         self._poll_interval_s = poll_interval_s
         self._job_timeout_s = job_timeout_s
@@ -89,6 +94,21 @@ class MainWindow(QMainWindow):
         toolbar.addAction("Open project…", self.open_project_dialog)
         toolbar.addAction("Open from RFI UUID…", self.open_from_rfi_dialog)
 
+        # Linked Accounts bound to every LLM job (docs/LLM_Call_Flow.md):
+        # populated from list_credentials(), stored by credential id.
+        cred_bar = QToolBar("Credentials")
+        cred_bar.setMovable(False)
+        self.addToolBar(cred_bar)
+        cred_bar.addWidget(QLabel(" Istari token: "))
+        self.istari_cred_combo = QComboBox()
+        self.istari_cred_combo.setMinimumWidth(160)
+        cred_bar.addWidget(self.istari_cred_combo)
+        cred_bar.addWidget(QLabel(" LLM token: "))
+        self.llm_cred_combo = QComboBox()
+        self.llm_cred_combo.setMinimumWidth(160)
+        cred_bar.addWidget(self.llm_cred_combo)
+        cred_bar.addAction("Refresh", self.refresh_credentials)
+
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         dock = QDockWidget("Session log")
@@ -99,6 +119,61 @@ class MainWindow(QMainWindow):
         self.review_screen.commit_requested.connect(self.start_commit)
         self.stage2_page.ingest_requested.connect(self.start_ingest)
         self.stage2_page.retry_requested.connect(self.retry_response)
+
+        self.refresh_credentials()
+
+    # -------------------------------------------------------- credentials
+
+    def refresh_credentials(self) -> None:
+        """Populate the credential pickers from the platform's Linked
+        Accounts (list_credentials) off the UI thread."""
+        istari = self._istari
+        worker = Worker(istari.list_credentials)
+        worker.signals.finished.connect(self._on_credentials_listed)
+        worker.signals.failed.connect(
+            lambda reason: self.log(f"credential listing FAILED: {reason}")
+        )
+        self._spawn(worker)
+
+    def _on_credentials_listed(self, credentials: list[CredentialInfo]) -> None:
+        for combo in (self.istari_cred_combo, self.llm_cred_combo):
+            selected = combo.currentData()
+            combo.clear()
+            for cred in credentials:
+                label = cred.name + (f" ({cred.auth_type})" if cred.auth_type else "")
+                combo.addItem(label, cred.credential_id)
+            if selected is not None:
+                index = combo.findData(selected)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        # heuristic preselect by auth_type when the platform tags them
+        for combo, wanted in ((self.istari_cred_combo, "istari"),
+                              (self.llm_cred_combo, "llm")):
+            for i, cred in enumerate(credentials):
+                if cred.auth_type and wanted in cred.auth_type.lower():
+                    combo.setCurrentIndex(i)
+                    break
+        self.log(f"{len(credentials)} linked account(s) available")
+
+    def _llm_job_config(self) -> LLMJobConfig | None:
+        """Selected credentials + configured provider/model defaults; None
+        (with a warning) when no credentials are selected."""
+        istari_id = self.istari_cred_combo.currentData()
+        llm_id = self.llm_cred_combo.currentData()
+        if not istari_id or not llm_id:
+            QMessageBox.warning(
+                self, "No credentials",
+                "Select an Istari token and an LLM token in the credentials "
+                "bar first (Linked Accounts on the platform).",
+            )
+            return None
+        return LLMJobConfig(
+            credentials=CredentialSelection(
+                istari_credential_id=istari_id, llm_credential_id=llm_id
+            ),
+            provider=self._llm_provider,
+            model=self._llm_model,
+        )
 
     # --------------------------------------------------------------- log
 
@@ -132,12 +207,15 @@ class MainWindow(QMainWindow):
             if answer is not QMessageBox.StandardButton.Yes:
                 self.log("stage 1 re-run cancelled by user")
                 return
+        llm_config = self._llm_job_config()
+        if llm_config is None:
+            return
         self.stage1_page.set_busy(True)
         self.log(f"stage 1: extracting requirements from RFI {rfi_uuid}")
         worker = Worker(
             pipeline.run_stage1_extraction,
             self._istari,
-            self._llm,
+            llm_config,
             rfi_uuid,
             revision_id=revision_id or None,
             poll_interval_s=self._poll_interval_s,
@@ -258,10 +336,13 @@ class MainWindow(QMainWindow):
     def _run_responses(self, records: list[ResponseRecord], *, force: bool) -> None:
         """Process a batch sequentially in ONE worker so project-file writes
         stay single-threaded."""
+        llm_config = self._llm_job_config()
+        if llm_config is None:
+            return
         project, path = self.project, self._ensure_project_path()
         if path is None:
             return
-        istari, llm = self._istari, self._llm
+        istari = self._istari
         req_artifact = self.requirements_artifact
         poll, timeout = self._poll_interval_s, self._job_timeout_s
 
@@ -272,7 +353,7 @@ class MainWindow(QMainWindow):
                     if progress else None
                 )
                 pipeline.process_response(
-                    istari, llm, project, path, record, req_artifact,
+                    istari, llm_config, project, path, record, req_artifact,
                     force=force, poll_interval_s=poll, job_timeout_s=timeout,
                     progress=per_response, log=log,
                 )

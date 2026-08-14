@@ -29,10 +29,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     from .istari_adapter import IstariAdapter
-    from .llm_adapter import make_llm
 
     istari = IstariAdapter(config.istari)
-    llm = make_llm(config.llm)
 
     from PySide6.QtWidgets import QApplication
 
@@ -41,7 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     window = MainWindow(
         istari,
-        llm,
+        llm_provider=config.llm.provider,
+        llm_model=config.llm.model,
         project_dir=Path(args.project_dir) if args.project_dir else None,
         poll_interval_s=config.istari.job_poll_interval_s,
         job_timeout_s=config.istari.job_timeout_s,

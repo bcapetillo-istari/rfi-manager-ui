@@ -1,5 +1,32 @@
 # PROGRESS
 
+## Re-architecture — LLM calls as Istari Agent jobs (done, 2026-08-14)
+
+Per docs/LLM_Call_Flow.md (PRD updated first): all LLM calls now run as
+platform jobs against the `@istari_utils:rfi_manager` module — functions
+`extract_rfi_requirements` and `extract_response_requirements`, each owning
+its prompt module-side.
+
+- Deleted client-side LLM path (`llm_adapter.py`, `prompts.py`, anthropic +
+  httpx deps). No LLM key exists client-side: Linked Accounts bound to jobs
+  via `add_job(auth_bindings=[NewCredentialBinding(...)])`; UI credential
+  pickers fed by `list_credentials()`.
+- State machine gains `llm_job_submitted`; ResponseRecord persists
+  `llm_job_id` + `llm_attempts` (crash-safe retry-once via the
+  `validation_errors` job parameter). The LLM job's `llm_output.json`
+  artifact replaces the local scratch cache as the post-LLM checkpoint.
+- Jobs reference the extracted-text artifact revision — document text never
+  travels through job parameters.
+- pytest: 91 passed; headless smoke green (stage1 → commit → batch →
+  table → rebuild → reopen).
+
+Blocked / waiting on external:
+- The `@istari_utils:rfi_manager` module does not exist yet. All identifiers
+  (function names, tool_name/tool_version/OS, `llm_output.json`, parameter
+  names) live in one constants block in `istari_adapter.py` — adjust to the
+  deployed manifest on delivery. Live verification is a human-run step.
+- Confirm an `@token:llm` auth integration exists on the target instance.
+
 ## M3 — Stage 2 + comparison table + resume/rebuild (done, 2026-08-14)
 
 Done:
