@@ -148,6 +148,21 @@ class IstariAdapter:
         self._v3 = V3Client(sdk_config)
         self._link_type_id: str | None = None
 
+    # --------------------------------------------------------- connection
+
+    def check_connection(self) -> str:
+        """``client.get_current_user()`` -> display name/email. Validates the
+        registry URL + PAT the user typed into the connection bar."""
+        try:
+            user = self._client.get_current_user()
+        except Exception as e:
+            raise IstariError(f"cannot connect to registry: {e}") from e
+        return (
+            getattr(user, "display_name", None)
+            or getattr(user, "email", None)
+            or "connected"
+        )
+
     # ------------------------------------------------------------- models
 
     def get_model_info(self, model_id: str) -> ModelInfo:

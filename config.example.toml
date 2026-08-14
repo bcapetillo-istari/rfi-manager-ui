@@ -1,13 +1,14 @@
-# RFI Manager configuration. Copy to config.toml (git-ignored) and edit.
+# RFI Manager configuration. OPTIONAL — copy to config.toml (git-ignored)
+# to preset defaults. Connection happens in the app's connection bar
+# (Registry URL + PAT text boxes); values here only prefill it.
 #
-# The only client-side secret is the Istari platform token:
-#   export ISTARI_TOKEN=...
-#
+# The ISTARI_TOKEN env var, when set, prefills the PAT box (never required).
 # There is NO LLM API key here (or anywhere client-side): LLM calls run as
 # Istari Agent jobs, and LLM credentials are Istari Linked Accounts selected
 # in the app's credential picker.
 
 [istari]
+# prefill for the connection bar's Registry URL box
 base_url = "https://your-instance.istaridigital.com"
 request_timeout_s = 60.0
 job_poll_interval_s = 3.0

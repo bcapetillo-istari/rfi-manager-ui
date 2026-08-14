@@ -40,8 +40,9 @@ any work. The PRD wins over this file if they ever conflict.**
 - The platform is the source of truth; the local project file is a pointer cache
   written atomically at every state transition (PRD §3.6). If a feature would
   make the local machine hold unrecoverable data, the design is wrong.
-- Secrets (the Istari token) come from environment variables only; LLM keys
-  never exist client-side (Linked Accounts, bound by credential id). Never
+- Secrets: the Istari PAT is typed into the UI connection bar (or prefilled
+  from the ISTARI_TOKEN env var) and held in memory only; LLM keys never
+  exist client-side (Linked Accounts, bound by credential id). Never
   write them to disk, project files, logs, or commits.
 
 ## Dev environment

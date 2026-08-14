@@ -48,9 +48,12 @@ static HTML uploaded to Istari).
 2. All SDK/network work runs on QThreadPool workers (QRunnable) communicating
    via signals. The UI thread never blocks. Every long operation reports progress
    states: queued -> extracting -> llm -> validating -> uploading -> done|failed(reason).
-3. Config from `config.toml` + env-var overrides: istari base URL, istari token
-   (env only, never written to disk by the app), default LLM provider/model
-   (forwarded as job parameters), request timeouts, retry counts. There is NO
+3. Connection to the Istari registry comes from the UI: a connection bar with
+   Registry URL and PAT text boxes (PAT masked, held in memory only, never
+   written to disk by the app). `config.toml` is OPTIONAL and provides
+   defaults/prefill only: registry URL prefill, default LLM provider/model
+   (forwarded as job parameters), request timeouts, retry counts; the
+   ISTARI_TOKEN env var, when set, prefills the PAT box. There is NO
    LLM API key on the client: LLM credentials are Istari Linked Accounts
    (stored credentials), bound to jobs by reference via `auth_bindings`. The
    UI offers credential pickers populated from `list_credentials()`.

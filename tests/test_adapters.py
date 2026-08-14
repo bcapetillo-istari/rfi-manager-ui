@@ -18,6 +18,7 @@ from rfi_manager.istari_adapter import (
 from tests.fakes import FakeIstari
 
 ADAPTER_METHODS = [
+    "check_connection",
     "get_model_info",
     "model_id_for_revision",
     "submit_extraction_job",

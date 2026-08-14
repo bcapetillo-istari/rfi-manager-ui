@@ -57,10 +57,21 @@ def main() -> None:
     rb = istari.add_model("beta.pdf", text="BETA TEXT")
     tmp = Path(tempfile.mkdtemp())
 
-    win = MainWindow(istari, llm_provider="claude", llm_model="claude-opus-5",
+    # ---- 0. Connection bar: start disconnected, guard fires, then connect
+    win = MainWindow(adapter_factory=lambda config: istari,
+                     llm_provider="claude", llm_model="claude-opus-5",
                      project_dir=tmp, poll_interval_s=0)
     win.show()
+    assert "not connected" in win.connection_label.text()
+    with mock.patch.object(QMessageBox, "warning") as w:
+        win.start_extraction("anything", "")
+        assert w.called, "actions must be blocked before connecting"
+    win.registry_url_edit.setText("https://fake.istari.example")
+    win.pat_edit.setText("fake-pat")
+    win.connect_to_registry()
+    pump(app, lambda: "connected as" in win.connection_label.text(), "connect")
     pump(app, lambda: win.llm_cred_combo.count() == 2, "credentials")
+    print("0. connection bar (guard, connect, credentials load): OK")
 
     # ---- 1. Stage 1 + review edits + commit (FR1/FR2)
     istari.queue_llm_output(REQS)

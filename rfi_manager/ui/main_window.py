@@ -7,6 +7,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from typing import Any, Callable
+
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -14,14 +16,17 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QStackedWidget,
     QToolBar,
 )
 
 from .. import pipeline
+from ..config import IstariConfig
 from ..istari_adapter import CredentialInfo, CredentialSelection
 from ..models import (
     RESUMABLE_STATES,
@@ -40,27 +45,46 @@ from .stage2_page import Stage2Page
 from .workers import Worker
 
 
+def _default_adapter_factory(config: IstariConfig):
+    from ..istari_adapter import IstariAdapter
+
+    return IstariAdapter(config)
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
-        istari,
+        istari=None,
         *,
+        adapter_factory: Callable[[IstariConfig], Any] | None = None,
+        registry_url_prefill: str = "",
+        pat_prefill: str = "",
         llm_provider: str | None = None,
         llm_model: str | None = None,
         project_dir: Path | None = None,
         poll_interval_s: float = 3.0,
         job_timeout_s: float = 900.0,
+        request_timeout_s: float = 60.0,
+        retries: int = 2,
     ) -> None:
+        """``istari`` may be a ready adapter (tests/fakes) or None — the
+        normal flow is: user types Registry URL + PAT into the connection bar
+        and clicks Connect, which builds the adapter via ``adapter_factory``
+        (default: the real IstariAdapter). The PAT lives in the widget/adapter
+        memory only — never on disk."""
         super().__init__()
         self.setWindowTitle("RFI Manager")
         self.resize(1200, 750)
 
         self._istari = istari
+        self._adapter_factory = adapter_factory or _default_adapter_factory
         self._llm_provider = llm_provider
         self._llm_model = llm_model
         self._project_dir = project_dir
         self._poll_interval_s = poll_interval_s
         self._job_timeout_s = job_timeout_s
+        self._request_timeout_s = request_timeout_s
+        self._retries = retries
         self._pool = QThreadPool.globalInstance()
         self._workers: list[Worker] = []  # keep refs while running
 
@@ -75,20 +99,55 @@ class MainWindow(QMainWindow):
         self.stage2_page = Stage2Page()
         self.comparison_page = ComparisonPage()
         self._stack = QStackedWidget()
-        for page in (self.stage1_page, self.review_screen, self.stage2_page,
-                     self.comparison_page):
+        for page in (
+            self.stage1_page,
+            self.review_screen,
+            self.stage2_page,
+            self.comparison_page,
+        ):
             self._stack.addWidget(page)
         self.setCentralWidget(self._stack)
 
         toolbar = QToolBar("Navigation")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
-        toolbar.addAction("Stage 1: RFI", lambda: self._stack.setCurrentWidget(self.stage1_page))
-        toolbar.addAction("Stage 2: Responses", lambda: self._stack.setCurrentWidget(self.stage2_page))
-        toolbar.addAction("Compare", lambda: self._stack.setCurrentWidget(self.comparison_page))
+        toolbar.addAction(
+            "Stage 1: RFI", lambda: self._stack.setCurrentWidget(self.stage1_page)
+        )
+        toolbar.addAction(
+            "Stage 2: Responses", lambda: self._stack.setCurrentWidget(self.stage2_page)
+        )
+        toolbar.addAction(
+            "Compare", lambda: self._stack.setCurrentWidget(self.comparison_page)
+        )
         toolbar.addSeparator()
         toolbar.addAction("Open project…", self.open_project_dialog)
         toolbar.addAction("Open from RFI UUID…", self.open_from_rfi_dialog)
+
+        # Connection to the registry comes from the UI, not config.toml
+        # (PRD §3.3): URL + PAT typed here, adapter built on Connect. The PAT
+        # box is masked and its value never leaves process memory.
+        conn_bar = QToolBar("Connection")
+        conn_bar.setMovable(False)
+        self.addToolBar(conn_bar)
+        conn_bar.addWidget(QLabel(" Registry URL: "))
+        self.registry_url_edit = QLineEdit(registry_url_prefill)
+        self.registry_url_edit.setMinimumWidth(240)
+        self.registry_url_edit.setPlaceholderText("https://your-instance.istaridigital.com")
+        conn_bar.addWidget(self.registry_url_edit)
+        conn_bar.addWidget(QLabel(" PAT: "))
+        self.pat_edit = QLineEdit(pat_prefill)
+        self.pat_edit.setMinimumWidth(200)
+        self.pat_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pat_edit.setPlaceholderText("Istari personal access token")
+        conn_bar.addWidget(self.pat_edit)
+        self.connect_button = QPushButton("Connect")
+        self.connect_button.clicked.connect(self.connect_to_registry)
+        conn_bar.addWidget(self.connect_button)
+        self.connection_label = QLabel(" connected (injected)" if istari else " not connected")
+        conn_bar.addWidget(self.connection_label)
+
+        self.addToolBarBreak()
 
         # Linked Accounts bound to every LLM job (docs/LLM_Call_Flow.md):
         # populated from list_credentials(), stored by credential id.
@@ -116,14 +175,75 @@ class MainWindow(QMainWindow):
         self.stage2_page.ingest_requested.connect(self.start_ingest)
         self.stage2_page.retry_requested.connect(self.retry_response)
 
+        if self._istari is not None:  # injected adapter (tests/fakes)
+            self.refresh_credentials()
+
+    # --------------------------------------------------------- connection
+
+    def _require_connection(self):
+        """The connected adapter, or None with a warning shown."""
+        if self._istari is None:
+            QMessageBox.warning(
+                self, "Not connected",
+                "Enter the Registry URL and your PAT in the connection bar "
+                "and click Connect first.",
+            )
+            return None
+        return self._istari
+
+    def connect_to_registry(self) -> None:
+        """Build an adapter from the typed URL + PAT and validate it off the
+        UI thread (check_connection -> get_current_user)."""
+        url = self.registry_url_edit.text().strip()
+        pat = self.pat_edit.text().strip()
+        if not url or not pat:
+            QMessageBox.warning(self, "Missing fields",
+                                "Enter both the Registry URL and a PAT.")
+            return
+        config = IstariConfig(
+            base_url=url,
+            token=pat,
+            request_timeout_s=self._request_timeout_s,
+            retries=self._retries,
+            job_poll_interval_s=self._poll_interval_s,
+            job_timeout_s=self._job_timeout_s,
+        )
+        self.connect_button.setEnabled(False)
+        self.connection_label.setText(" connecting…")
+        self.log(f"connecting to {url}")
+        factory = self._adapter_factory
+
+        def build_and_check():
+            adapter = factory(config)
+            return adapter, adapter.check_connection()
+
+        worker = Worker(build_and_check)
+        worker.signals.finished.connect(self._on_connected)
+        worker.signals.failed.connect(self._on_connect_failed)
+        self._spawn(worker)
+
+    def _on_connected(self, result) -> None:
+        adapter, user = result
+        self._istari = adapter
+        self.connect_button.setEnabled(True)
+        self.connection_label.setText(f" connected as {user}")
+        self.log(f"connected to registry as {user}")
         self.refresh_credentials()
+
+    def _on_connect_failed(self, reason: str) -> None:
+        self.connect_button.setEnabled(True)
+        self.connection_label.setText(" connection failed")
+        self.log(f"connection FAILED: {reason}")
+        QMessageBox.critical(self, "Connection failed", reason)
 
     # -------------------------------------------------------- credentials
 
     def refresh_credentials(self) -> None:
         """Populate the credential pickers from the platform's Linked
         Accounts (list_credentials) off the UI thread."""
-        istari = self._istari
+        istari = self._require_connection()
+        if istari is None:
+            return
         worker = Worker(istari.list_credentials)
         worker.signals.finished.connect(self._on_credentials_listed)
         worker.signals.failed.connect(
@@ -132,8 +252,10 @@ class MainWindow(QMainWindow):
         self._spawn(worker)
 
     def _on_credentials_listed(self, credentials: list[CredentialInfo]) -> None:
-        for combo, wanted in ((self.istari_cred_combo, "istari"),
-                              (self.llm_cred_combo, "llm")):
+        for combo, wanted in (
+            (self.istari_cred_combo, "istari"),
+            (self.llm_cred_combo, "llm"),
+        ):
             selected = combo.currentData()
             combo.clear()
             for cred in credentials:
@@ -159,7 +281,8 @@ class MainWindow(QMainWindow):
         llm_id = self.llm_cred_combo.currentData()
         if not istari_id or not llm_id:
             QMessageBox.warning(
-                self, "No credentials",
+                self,
+                "No credentials",
                 "Select an Istari token and an LLM token in the credentials "
                 "bar first (Linked Accounts on the platform).",
             )
@@ -192,8 +315,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ stage 1
 
     def start_extraction(self, rfi_uuid: str, revision_id: str) -> None:
+        if self._require_connection() is None:
+            return
         if self._batch_running:
-            QMessageBox.warning(self, "Busy", "A batch is running — wait for it to finish.")
+            QMessageBox.warning(
+                self, "Busy", "A batch is running — wait for it to finish."
+            )
             return
         if self.project is not None and self.project.schema_version:
             answer = QMessageBox.question(
@@ -210,6 +337,8 @@ class MainWindow(QMainWindow):
         llm_config = self._llm_job_config()
         if llm_config is None:
             return
+        # (registry URL/PAT are fixed at Connect time — the adapter was built
+        # from the connection bar's values; see connect_to_registry)
         self.stage1_page.set_busy(True)
         self.log(f"stage 1: extracting requirements from RFI {rfi_uuid}")
         worker = Worker(
@@ -253,12 +382,16 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- commit
 
-    def start_commit(self, requirements: list[Requirement], schema_version: str) -> None:
+    def start_commit(
+        self, requirements: list[Requirement], schema_version: str
+    ) -> None:
         result = self._stage1_result
         if result is None:
             return
         self.review_screen.set_busy(True)
-        self.log(f"committing {len(requirements)} requirements, schema v{schema_version}")
+        self.log(
+            f"committing {len(requirements)} requirements, schema v{schema_version}"
+        )
         worker = Worker(
             pipeline.commit_requirements,
             self._istari,
@@ -316,8 +449,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ stage 2
 
     def start_ingest(self, uuids: list[str], force: bool) -> None:
+        if self._require_connection() is None:
+            return
         if self.project is None or self.requirements_artifact is None:
-            QMessageBox.warning(self, "No schema", "Commit a requirements schema first.")
+            QMessageBox.warning(
+                self, "No schema", "Commit a requirements schema first."
+            )
             return
         current_schema = self.project.schema_version
         records: list[ResponseRecord] = []
@@ -341,7 +478,8 @@ class MainWindow(QMainWindow):
             elif record.state is PipelineState.DONE:
                 # same revision+schema: FR5 idempotency, nothing to do
                 self.stage2_page.update_status(
-                    uuid, record.state.value,
+                    uuid,
+                    record.state.value,
                     "already done for this schema — use Force re-extract",
                 )
                 continue
@@ -371,8 +509,9 @@ class MainWindow(QMainWindow):
         stay single-threaded. Re-entrancy guarded: a second batch (retry click,
         resume, rebuild) must wait for the running one."""
         if self._batch_running:
-            QMessageBox.warning(self, "Busy", "A batch is already running — "
-                                "wait for it to finish.")
+            QMessageBox.warning(
+                self, "Busy", "A batch is already running — " "wait for it to finish."
+            )
             return
         llm_config = self._llm_job_config()
         if llm_config is None:
@@ -388,12 +527,21 @@ class MainWindow(QMainWindow):
             for record in records:
                 per_response = (
                     (lambda s, d, u=record.uuid: progress(s, f"{u}::{d}"))
-                    if progress else None
+                    if progress
+                    else None
                 )
                 pipeline.process_response(
-                    istari, llm_config, project, path, record, req_artifact,
-                    force=force, poll_interval_s=poll, job_timeout_s=timeout,
-                    progress=per_response, log=log,
+                    istari,
+                    llm_config,
+                    project,
+                    path,
+                    record,
+                    req_artifact,
+                    force=force,
+                    poll_interval_s=poll,
+                    job_timeout_s=timeout,
+                    progress=per_response,
+                    log=log,
                 )
             return records
 
@@ -434,13 +582,17 @@ class MainWindow(QMainWindow):
         (content is never read from the project file — PRD §3.6a)."""
         if self.project is None or self.requirements_artifact is None:
             return
+        if self._istari is None:
+            return
         istari, project = self._istari, self.project
 
         def fetch():
             entries = []
             for record in project.responses:
                 if record.state is PipelineState.DONE and record.answers_artifact_uuid:
-                    entries.append((record, pipeline.fetch_answers_artifact(istari, record)))
+                    entries.append(
+                        (record, pipeline.fetch_answers_artifact(istari, record))
+                    )
             return entries
 
         worker = Worker(fetch)
@@ -453,7 +605,9 @@ class MainWindow(QMainWindow):
     def _on_comparison_fetched(self, entries) -> None:
         assert self.project is not None and self.requirements_artifact is not None
         rows = pipeline.build_comparison_rows(
-            self.requirements_artifact.requirements, entries, self.project.schema_version
+            self.requirements_artifact.requirements,
+            entries,
+            self.project.schema_version,
         )
         self.comparison_page.load(self.requirements_artifact.requirements, rows)
         self.log(f"comparison table: {len(rows)} responses")
@@ -470,8 +624,12 @@ class MainWindow(QMainWindow):
             self.open_project(Path(chosen))
 
     def open_project(self, path: Path) -> None:
+        if self._require_connection() is None:
+            return
         if self._batch_running:
-            QMessageBox.warning(self, "Busy", "A batch is running — wait for it to finish.")
+            QMessageBox.warning(
+                self, "Busy", "A batch is running — wait for it to finish."
+            )
             return
         try:
             project = load_project(path)
@@ -506,9 +664,7 @@ class MainWindow(QMainWindow):
             self.stage2_page.update_status(
                 record.uuid, record.state.value, record.error or ""
             )
-        incomplete = [
-            r for r in self.project.responses if r.state in RESUMABLE_STATES
-        ]
+        incomplete = [r for r in self.project.responses if r.state in RESUMABLE_STATES]
         if incomplete:
             answer = QMessageBox.question(
                 self,
@@ -544,8 +700,12 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(self.stage1_page)
 
     def open_from_rfi(self, rfi_uuid: str) -> None:
+        if self._require_connection() is None:
+            return
         if self._batch_running:
-            QMessageBox.warning(self, "Busy", "A batch is running — wait for it to finish.")
+            QMessageBox.warning(
+                self, "Busy", "A batch is running — wait for it to finish."
+            )
             return
         self.log(f"rebuilding project from platform for RFI {rfi_uuid} (FR12)")
         istari = self._istari

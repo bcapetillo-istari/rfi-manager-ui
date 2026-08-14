@@ -143,6 +143,9 @@ class FakeIstari:
 
     # ------------------------------------------------- adapter interface
 
+    def check_connection(self) -> str:
+        return "fake-user@example"
+
     def get_model_info(self, model_id: str) -> ModelInfo:
         if model_id not in self.models:
             raise IstariError(f"cannot fetch model {model_id}: not found")

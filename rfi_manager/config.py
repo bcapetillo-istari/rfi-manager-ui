@@ -51,8 +51,15 @@ class ConfigError(Exception):
     """Raised when configuration is missing or invalid."""
 
 
-def load_config(path: str | Path = "config.toml") -> AppConfig:
-    """Load ``config.toml``, apply env overrides, and pull secrets from env."""
+def load_config(
+    path: str | Path = "config.toml", *, require_token: bool = True
+) -> AppConfig:
+    """Load ``config.toml``, apply env overrides, and pull secrets from env.
+
+    With ``require_token=False`` (the UI flow: registry URL and PAT come from
+    the connection bar), a missing ISTARI_TOKEN yields ``token=""`` — the env
+    var, when set, is only a prefill for the PAT box.
+    """
     load_dotenv()
     path = Path(path)
     if not path.exists():
@@ -71,7 +78,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     llm_raw = raw.get("llm", {})
 
     token = os.environ.get(ENV_ISTARI_TOKEN, "")
-    if not token:
+    if not token and require_token:
         raise ConfigError(f"{ENV_ISTARI_TOKEN} environment variable is not set")
     if "token" in istari_raw:
         raise ConfigError(
@@ -84,7 +91,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         )
 
     base_url = os.environ.get(ENV_ISTARI_BASE_URL) or istari_raw.get("base_url", "")
-    if not base_url:
+    if not base_url and require_token:
         raise ConfigError("istari.base_url missing from config.toml (or ISTARI_BASE_URL env)")
 
     return AppConfig(
