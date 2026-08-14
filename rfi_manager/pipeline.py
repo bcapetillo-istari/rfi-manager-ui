@@ -13,8 +13,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from .istari_adapter import ArtifactInfo, IstariError, JobState, ModelInfo
-from .llm_adapter import LLMError
+from .istari_adapter import (
+    LLM_FUNCTION_EXTRACT_RESPONSE,
+    LLM_FUNCTION_EXTRACT_RFI,
+    LLM_OUTPUT_ARTIFACT,
+    ArtifactInfo,
+    CredentialSelection,
+    IstariError,
+    JobState,
+    ModelInfo,
+)
 from .models import (
     CONFIDENCE_LEVELS,
     NOT_FOUND,
@@ -23,7 +31,6 @@ from .models import (
     Requirement,
     RequirementsArtifact,
 )
-from .prompts import PROMPT_VERSION, SYSTEM_PROMPT, prompt_a, with_retry_errors
 
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
 
@@ -267,37 +274,9 @@ def validate_answers(raw_llm_output: str, requirements: list[Requirement]) -> Va
     return result
 
 
-class LLMClient(Protocol):
-    """The llm_adapter interface (PRD §3.4)."""
-
-    def complete(self, system: str, user: str) -> str: ...
-
-
-def call_llm_validated(
-    llm: LLMClient,
-    user_prompt: str,
-    validator: Callable[[str], ValidationResult],
-    *,
-    system_prompt: str = SYSTEM_PROMPT,
-) -> tuple[ValidationResult, str]:
-    """Call the LLM and validate; on failure, retry ONCE with the error list
-    appended to the prompt (PRD §4). Returns (result, raw_llm_output).
-
-    The returned raw output is what callers checkpoint to the LLM scratch
-    cache (PRD §3.6b) — it corresponds to the returned ValidationResult.
-    """
-    raw = llm.complete(system_prompt, user_prompt)
-    result = validator(raw)
-    if result.ok:
-        return result, raw
-    retry_prompt = with_retry_errors(user_prompt, result.errors)
-    raw2 = llm.complete(system_prompt, retry_prompt)
-    result2 = validator(raw2)
-    return result2, raw2
-
-
 # --------------------------------------------------------------------------
-# Orchestration (Stage 1). Progress states per PRD §3.2:
+# Orchestration. LLM calls are Istari Agent jobs (PRD §3.4,
+# docs/LLM_Call_Flow.md). Progress states per PRD §3.2:
 # queued -> extracting -> llm -> validating -> uploading -> done | failed
 # --------------------------------------------------------------------------
 
@@ -312,9 +291,16 @@ class IstariClient(Protocol):
     """The istari_adapter interface the pipeline depends on."""
 
     def get_model_info(self, model_id: str) -> ModelInfo: ...
+    def model_id_for_revision(self, revision_id: str) -> str: ...
     def submit_extraction_job(self, model_id: str) -> str: ...
+    def submit_llm_job(
+        self, model_id: str, function: str, parameters: dict[str, Any],
+        credentials: CredentialSelection,
+    ) -> str: ...
     def get_job_state(self, job_id: str) -> JobState: ...
     def get_extracted_text(self, model_id: str) -> str: ...
+    def read_text_artifact(self, model_id: str, name: str) -> str: ...
+    def find_artifact(self, model_id: str, name: str) -> ArtifactInfo | None: ...
     def upload_json_artifact(
         self, model_id: str, name: str, payload: dict[str, Any],
         *, description: str | None = None,
@@ -324,6 +310,105 @@ class IstariClient(Protocol):
     ) -> list[tuple[ArtifactInfo, dict[str, Any]]]: ...
     def create_link(self, source_revision_id: str, produced_revision_id: str): ...
     def list_links(self, revision_id: str): ...
+
+
+@dataclass(frozen=True)
+class LLMJobConfig:
+    """Everything an LLM job needs beyond its stage-specific inputs: the
+    Linked Accounts to bind and the provider/model defaults forwarded as
+    job parameters (PRD §3.3)."""
+
+    credentials: CredentialSelection
+    provider: str | None = None
+    model: str | None = None
+
+    @property
+    def llm_model_stamp(self) -> str:
+        """Value recorded as llm_model in artifact metadata."""
+        if self.provider and self.model:
+            return f"{self.provider}:{self.model}"
+        return self.model or self.provider or "module-default"
+
+
+def _llm_parameters(
+    config: LLMJobConfig,
+    text_artifact: ArtifactInfo,
+    *,
+    extra: dict[str, Any] | None = None,
+    validation_errors: list[str] | None = None,
+) -> dict[str, Any]:
+    """Job parameters per the @istari_utils:rfi_manager contract: revision
+    references to the extracted text (never the text itself), provider/model
+    defaults, and — on the §4 retry-once path — the validation error list."""
+    params: dict[str, Any] = {
+        "source_resource_id": text_artifact.artifact_id,
+        "source_revision_id": text_artifact.revision_id,
+    }
+    if config.provider:
+        params["provider"] = config.provider
+    if config.model:
+        params["model"] = config.model
+    if extra:
+        params.update(extra)
+    if validation_errors:
+        params["validation_errors"] = validation_errors
+    return params
+
+
+def _find_text_artifact(istari: IstariClient, model_id: str) -> ArtifactInfo:
+    from .istari_adapter import EXTRACT_TEXT_ARTIFACT
+
+    info = istari.find_artifact(model_id, EXTRACT_TEXT_ARTIFACT)
+    if info is None:
+        raise PipelineError(
+            f"model {model_id} has no {EXTRACT_TEXT_ARTIFACT} artifact — "
+            "did the extraction job complete?"
+        )
+    return info
+
+
+def run_llm_job_validated(
+    istari: IstariClient,
+    model_id: str,
+    function: str,
+    llm_config: LLMJobConfig,
+    validator: Callable[[str], ValidationResult],
+    *,
+    extra_parameters: dict[str, Any] | None = None,
+    poll_interval_s: float = 3.0,
+    job_timeout_s: float = 900.0,
+    progress: ProgressCallback | None = None,
+) -> tuple[ValidationResult, str]:
+    """Submit an LLM-function job, poll, read its raw-output artifact, and
+    validate client-side; on failure retry ONCE by resubmitting with the
+    validation_errors parameter (PRD §4). Returns (result, raw_output).
+
+    Used by interactive Stage 1; Stage 2 drives the same steps through the
+    persisted state machine instead so every step checkpoints.
+    """
+    text_artifact = _find_text_artifact(istari, model_id)
+    errors: list[str] | None = None
+    result = ValidationResult()
+    raw = ""
+    for _attempt in range(2):
+        params = _llm_parameters(
+            llm_config, text_artifact, extra=extra_parameters,
+            validation_errors=errors,
+        )
+        job_id = istari.submit_llm_job(model_id, function, params, llm_config.credentials)
+        _notify(progress, "llm", f"LLM job {job_id} submitted ({function})")
+        wait_for_job(
+            istari, job_id,
+            poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
+            progress=progress,
+        )
+        raw = istari.read_text_artifact(model_id, LLM_OUTPUT_ARTIFACT)
+        _notify(progress, "validating", f"LLM job {job_id} output")
+        result = validator(raw)
+        if result.ok:
+            return result, raw
+        errors = result.errors
+    return result, raw
 
 
 REQUIREMENTS_ARTIFACT_NAME = "rfi-requirements.json"
@@ -376,7 +461,7 @@ class Stage1Result:
 
 def run_stage1_extraction(
     istari: IstariClient,
-    llm: LLMClient,
+    llm_config: LLMJobConfig,
     rfi_uuid: str,
     *,
     revision_id: str | None = None,
@@ -385,7 +470,8 @@ def run_stage1_extraction(
     progress: ProgressCallback | None = None,
 ) -> Stage1Result:
     """Stage 1 up to (not including) commit: run Istari's PDF extraction on
-    the RFI, send text + Prompt A to the LLM, validate into Requirements.
+    the RFI, then the extract_rfi_requirements LLM job on the extracted-text
+    artifact, and validate the raw output into Requirements client-side.
     Raises PipelineError with the reason on any failure (FR10)."""
     _notify(progress, "queued", f"fetching RFI {rfi_uuid}")
     rfi = istari.get_model_info(rfi_uuid)
@@ -399,10 +485,13 @@ def run_stage1_extraction(
         istari, job_id,
         poll_interval_s=poll_interval_s, timeout_s=job_timeout_s, progress=progress,
     )
-    text = istari.get_extracted_text(rfi_uuid)
 
-    _notify(progress, "llm", "extracting requirements with LLM")
-    result, raw = call_llm_validated(llm, prompt_a(text), validate_requirements)
+    result, raw = run_llm_job_validated(
+        istari, rfi_uuid, LLM_FUNCTION_EXTRACT_RFI, llm_config,
+        validate_requirements,
+        poll_interval_s=poll_interval_s, job_timeout_s=job_timeout_s,
+        progress=progress,
+    )
     _notify(progress, "validating", f"{len(result.items)} requirements")
     if not result.ok:
         raise PipelineError(
@@ -415,7 +504,7 @@ def run_stage1_extraction(
         requirements=result.items,
         warnings=result.warnings,
         raw_llm_output=raw,
-        llm_model=getattr(llm, "model", "unknown"),
+        llm_model=llm_config.llm_model_stamp,
     )
 
 
@@ -438,7 +527,8 @@ def commit_requirements(
         schema_version=schema_version,
         generated_at=datetime.now(timezone.utc).isoformat(),
         llm_model=llm_model,
-        prompt_version=PROMPT_VERSION,
+        # prompts live module-side (FR9): stamp the function that produced them
+        prompt_version=LLM_FUNCTION_EXTRACT_RFI,
         requirements=requirements,
     )
     _notify(progress, "uploading", REQUIREMENTS_ARTIFACT_NAME)
@@ -479,13 +569,13 @@ from .models import (  # noqa: E402
     Project,
     ResponseRecord,
 )
-from .persistence import (  # noqa: E402
-    cache_llm_output,
-    clear_cached_llm_output,
-    load_cached_llm_output,
-    save_project,
-)
-from .prompts import prompt_b, prompt_b_version  # noqa: E402
+from .persistence import save_project  # noqa: E402
+
+
+def response_prompt_version(schema_version: str) -> str:
+    """prompt_version stamp for answers artifacts: the module function that
+    owns Prompt B plus the schema it was generated from (FR9/T3)."""
+    return f"{LLM_FUNCTION_EXTRACT_RESPONSE}+schema-{schema_version}"
 
 LogCallback = Callable[[str], None]
 
@@ -544,7 +634,7 @@ def _restart_from_queued(
 
 def process_response(
     istari: IstariClient,
-    llm: LLMClient,
+    llm_config: LLMJobConfig,
     project: Project,
     project_path: Path | str,
     record: ResponseRecord,
@@ -559,6 +649,8 @@ def process_response(
     """Drive one response through the state machine to done|failed (FR4/FR5,
     §3.6b). Works identically for fresh runs and resumes (FR11): each step
     continues from the record's persisted state and checkpoints evidence.
+    The post-LLM checkpoint is the LLM job's raw-output artifact on the
+    platform; the retry-once counter (llm_attempts) is persisted.
 
     ``record`` must already be in ``project.responses``. Raises nothing on
     pipeline failures — the record ends FAILED with ``record.error`` set;
@@ -566,9 +658,11 @@ def process_response(
     """
     schema_version = requirements_artifact.schema_version
     requirements = requirements_artifact.requirements
+    requirements_json = [r.to_dict() for r in requirements]
 
     # in-memory carry between steps within this call (never persisted)
     validated: list[Answer] | None = None
+    last_errors: list[str] | None = None
 
     while record.state not in (PipelineState.DONE, PipelineState.FAILED):
         try:
@@ -589,8 +683,9 @@ def process_response(
                         record.schema_version = schema_version
                         for state in (
                             PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
-                            PipelineState.LLM_RETURNED, PipelineState.VALIDATED,
-                            PipelineState.UPLOADED, PipelineState.DONE,
+                            PipelineState.LLM_JOB_SUBMITTED, PipelineState.LLM_RETURNED,
+                            PipelineState.VALIDATED, PipelineState.UPLOADED,
+                            PipelineState.DONE,
                         ):
                             record.transition(state)
                         save_project(project, project_path)
@@ -620,16 +715,64 @@ def process_response(
 
             elif record.state is PipelineState.TEXT_RETRIEVED:
                 _notify(progress, "llm", record.uuid)
-                text = istari.get_extracted_text(record.uuid)
-                result, raw = call_llm_validated(
-                    llm, prompt_b(requirements, text),
-                    lambda t: validate_answers(t, requirements),
+                text_artifact = _find_text_artifact(istari, record.uuid)
+                params = _llm_parameters(
+                    llm_config, text_artifact,
+                    extra={"requirements_json": requirements_json},
                 )
-                record.llm_cache_path = str(
-                    cache_llm_output(project_path, record.uuid, raw)
+                record.llm_job_id = istari.submit_llm_job(
+                    record.uuid, LLM_FUNCTION_EXTRACT_RESPONSE, params,
+                    llm_config.credentials,
                 )
-                validated = result.items if result.ok else None
+                record.llm_attempts = 1
+                record.transition(PipelineState.LLM_JOB_SUBMITTED)
+                save_project(project, project_path)
+                _log(log, f"response {record.uuid}: LLM job {record.llm_job_id}")
+
+            elif record.state is PipelineState.LLM_JOB_SUBMITTED:
+                assert record.llm_job_id is not None
+                try:
+                    wait_for_job(
+                        istari, record.llm_job_id,
+                        poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
+                        progress=progress,
+                    )
+                except IstariError as e:  # LLM job id no longer usable (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         f"LLM job {record.llm_job_id} unusable ({e})",
+                                         log)
+                    continue
+                record.transition(PipelineState.LLM_RETURNED)
+                save_project(project, project_path)
+
+            elif record.state is PipelineState.LLM_RETURNED:
+                _notify(progress, "validating", record.uuid)
+                try:  # the raw-output artifact IS the checkpoint (§3.6b)
+                    raw = istari.read_text_artifact(record.uuid, LLM_OUTPUT_ARTIFACT)
+                except IstariError as e:
+                    _restart_from_queued(record, project, project_path,
+                                         f"LLM output artifact unusable ({e})", log)
+                    continue
+                result = validate_answers(raw, requirements)
                 if not result.ok:
+                    last_errors = result.errors
+                    if record.llm_attempts < 2:  # retry ONCE (§4), crash-safe
+                        _log(log, f"response {record.uuid}: validation failed — "
+                                  "resubmitting LLM job with validation_errors")
+                        text_artifact = _find_text_artifact(istari, record.uuid)
+                        params = _llm_parameters(
+                            llm_config, text_artifact,
+                            extra={"requirements_json": requirements_json},
+                            validation_errors=result.errors,
+                        )
+                        record.llm_job_id = istari.submit_llm_job(
+                            record.uuid, LLM_FUNCTION_EXTRACT_RESPONSE, params,
+                            llm_config.credentials,
+                        )
+                        record.llm_attempts += 1
+                        record.transition(PipelineState.LLM_JOB_SUBMITTED)
+                        save_project(project, project_path)
+                        continue
                     record.transition(
                         PipelineState.FAILED,
                         error="LLM answers failed validation after retry:\n"
@@ -639,48 +782,24 @@ def process_response(
                     break
                 for warning in result.warnings:
                     _log(log, f"response {record.uuid}: warning: {warning}")
-                record.transition(PipelineState.LLM_RETURNED)
-                save_project(project, project_path)
-
-            elif record.state is PipelineState.LLM_RETURNED:
-                _notify(progress, "validating", record.uuid)
-                raw = (
-                    load_cached_llm_output(record.llm_cache_path)
-                    if record.llm_cache_path else None
-                )
-                if raw is None:  # cache evidence unusable (FR11)
-                    _restart_from_queued(record, project, project_path,
-                                         "cached LLM output missing", log)
-                    continue
-                result = validate_answers(raw, requirements)
-                if not result.ok:
-                    record.transition(
-                        PipelineState.FAILED,
-                        error="cached LLM answers failed validation:\n"
-                        + "\n".join(result.errors),
-                    )
-                    save_project(project, project_path)
-                    break
                 validated = result.items
                 record.transition(PipelineState.VALIDATED)
                 save_project(project, project_path)
 
             elif record.state is PipelineState.VALIDATED:
                 _notify(progress, "uploading", record.uuid)
-                if validated is None:  # resuming: rebuild from the scratch cache
-                    raw = (
-                        load_cached_llm_output(record.llm_cache_path)
-                        if record.llm_cache_path else None
-                    )
-                    if raw is None:
+                if validated is None:  # resuming: re-read the platform checkpoint
+                    try:
+                        raw = istari.read_text_artifact(record.uuid, LLM_OUTPUT_ARTIFACT)
+                    except IstariError as e:
                         _restart_from_queued(record, project, project_path,
-                                             "cached LLM output missing", log)
+                                             f"LLM output artifact unusable ({e})", log)
                         continue
                     result = validate_answers(raw, requirements)
                     if not result.ok:
                         record.transition(
                             PipelineState.FAILED,
-                            error="cached LLM answers failed validation:\n"
+                            error="LLM answers failed validation:\n"
                             + "\n".join(result.errors),
                         )
                         save_project(project, project_path)
@@ -692,8 +811,8 @@ def process_response(
                     vendor=record.vendor or record.uuid,
                     schema_version=schema_version,
                     extracted_at=datetime.now(timezone.utc).isoformat(),
-                    llm_model=getattr(llm, "model", "unknown"),
-                    prompt_version=prompt_b_version(schema_version),
+                    llm_model=llm_config.llm_model_stamp,
+                    prompt_version=response_prompt_version(schema_version),
                     answers=validated,
                 )
                 info_art = istari.upload_json_artifact(
@@ -726,13 +845,10 @@ def process_response(
                     istari.create_link(req_rev, record.revision)
                 record.transition(PipelineState.DONE)
                 save_project(project, project_path)
-                clear_cached_llm_output(record.llm_cache_path)
-                record.llm_cache_path = None
-                save_project(project, project_path)
                 _notify(progress, "done", record.uuid)
                 _log(log, f"response {record.uuid}: done")
 
-        except (IstariError, LLMError, PipelineError) as e:
+        except (IstariError, PipelineError) as e:
             record.transition(PipelineState.FAILED, error=str(e))
             save_project(project, project_path)
             _notify(progress, "failed", str(e))

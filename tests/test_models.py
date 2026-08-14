@@ -65,11 +65,12 @@ def test_project_round_trip():
         rfi_uuid="rfi-123",
         rfi_revision="rev-1",
         requirements_artifact_uuid="art-55",
+        requirements_artifact_revision="art-55-rev-1",
         schema_version="1.0",
         responses=[
             ResponseRecord(uuid="resp-9", revision="rev-2",
                            state=PipelineState.LLM_RETURNED, job_id="job-7",
-                           llm_cache_path="/tmp/x.txt", vendor="Acme"),
+                           llm_job_id="llmjob-3", llm_attempts=1, vendor="Acme"),
         ],
     )
     assert Project.from_dict(project.to_dict()) == project
@@ -98,10 +99,17 @@ def test_data_contract_keys_frozen():
 def test_happy_path_transitions():
     record = ResponseRecord(uuid="r1")
     for state in [PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
-                  PipelineState.LLM_RETURNED, PipelineState.VALIDATED,
-                  PipelineState.UPLOADED, PipelineState.DONE]:
+                  PipelineState.LLM_JOB_SUBMITTED, PipelineState.LLM_RETURNED,
+                  PipelineState.VALIDATED, PipelineState.UPLOADED,
+                  PipelineState.DONE]:
         record.transition(state)
     assert record.state is PipelineState.DONE
+
+
+def test_retry_once_transition_is_legal():
+    """llm_returned -> llm_job_submitted is the §4 retry-once resubmission."""
+    assert can_transition(PipelineState.LLM_RETURNED, PipelineState.LLM_JOB_SUBMITTED)
+    assert not can_transition(PipelineState.VALIDATED, PipelineState.LLM_JOB_SUBMITTED)
 
 
 def test_illegal_transition_raises():
@@ -112,14 +120,16 @@ def test_illegal_transition_raises():
 
 def test_any_active_state_may_fail():
     for state in [PipelineState.QUEUED, PipelineState.JOB_SUBMITTED,
-                  PipelineState.TEXT_RETRIEVED, PipelineState.LLM_RETURNED,
-                  PipelineState.VALIDATED, PipelineState.UPLOADED]:
+                  PipelineState.TEXT_RETRIEVED, PipelineState.LLM_JOB_SUBMITTED,
+                  PipelineState.LLM_RETURNED, PipelineState.VALIDATED,
+                  PipelineState.UPLOADED]:
         assert can_transition(state, PipelineState.FAILED)
     assert not can_transition(PipelineState.DONE, PipelineState.FAILED)
 
 
 def test_failed_records_reason_and_retry_clears_evidence():
-    record = ResponseRecord(uuid="r1", job_id="job-7", llm_cache_path="/tmp/x.txt")
+    record = ResponseRecord(uuid="r1", job_id="job-7", llm_job_id="llmjob-2",
+                            llm_attempts=2)
     record.transition(PipelineState.JOB_SUBMITTED)
     record.transition(PipelineState.FAILED, error="job vanished")
     assert record.error == "job vanished"
@@ -127,4 +137,5 @@ def test_failed_records_reason_and_retry_clears_evidence():
     assert record.state is PipelineState.QUEUED
     assert record.error is None
     assert record.job_id is None
-    assert record.llm_cache_path is None
+    assert record.llm_job_id is None
+    assert record.llm_attempts == 0

@@ -1,5 +1,6 @@
-"""T6 (persistence parts) — project-file round-trip, atomic writes surviving a
-simulated crash mid-write, and the LLM scratch cache."""
+"""T6 (persistence parts) — project-file round-trip and atomic writes
+surviving a simulated crash mid-write. (The post-LLM checkpoint is a platform
+artifact, not a local cache — see test_resume_rebuild.py.)"""
 
 from __future__ import annotations
 
@@ -10,14 +11,7 @@ from unittest import mock
 import pytest
 
 from rfi_manager.models import PipelineState, Project, ResponseRecord
-from rfi_manager.persistence import (
-    cache_llm_output,
-    clear_cached_llm_output,
-    llm_cache_dir,
-    load_cached_llm_output,
-    load_project,
-    save_project,
-)
+from rfi_manager.persistence import load_project, save_project
 
 
 def make_project() -> Project:
@@ -84,24 +78,3 @@ def test_crash_before_fsync_preserves_original(tmp_path: Path):
     assert load_project(path) == original
     # failed temp file is cleaned up
     assert [p.name for p in tmp_path.iterdir()] == ["demo.rfiproj"]
-
-
-# ---------------------------------------------------------------- LLM cache
-
-def test_llm_cache_round_trip(tmp_path: Path):
-    project_path = tmp_path / "demo.rfiproj"
-    cache_path = cache_llm_output(project_path, "resp-9", "RAW LLM OUTPUT")
-    assert cache_path.is_relative_to(llm_cache_dir(project_path))
-    assert load_cached_llm_output(cache_path) == "RAW LLM OUTPUT"
-
-
-def test_llm_cache_missing_returns_none(tmp_path: Path):
-    assert load_cached_llm_output(tmp_path / "nope.txt") is None
-
-
-def test_clear_llm_cache(tmp_path: Path):
-    project_path = tmp_path / "demo.rfiproj"
-    cache_path = cache_llm_output(project_path, "resp-9", "RAW")
-    clear_cached_llm_output(cache_path)
-    assert load_cached_llm_output(cache_path) is None
-    clear_cached_llm_output(None)  # no-op, no error

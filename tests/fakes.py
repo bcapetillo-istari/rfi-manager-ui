@@ -1,17 +1,27 @@
-"""Fake adapters for tests (PRD §7). No network, no credentials, ever.
+"""Fake Istari adapter for tests (PRD §7). No network, no credentials, ever.
 
 FakeIstari mirrors rfi_manager.istari_adapter.IstariAdapter's public surface
 (same method names, same return dataclasses) — test_adapters.py enforces the
 match so the fake cannot drift from the real adapter.
+
+LLM calls are platform jobs (docs/LLM_Call_Flow.md): script the fake's LLM
+outputs with ``queue_llm_output(raw)``; each completing LLM job consumes one
+queued output and materializes it as an ``llm_output.json`` artifact on the
+job's model — exactly what the real @istari_utils:rfi_manager functions do.
 """
 
 from __future__ import annotations
 
 import itertools
+import json
 from typing import Any
 
 from rfi_manager.istari_adapter import (
+    EXTRACT_TEXT_ARTIFACT,
+    LLM_OUTPUT_ARTIFACT,
     ArtifactInfo,
+    CredentialInfo,
+    CredentialSelection,
     IstariError,
     JobState,
     LinkInfo,
@@ -19,23 +29,9 @@ from rfi_manager.istari_adapter import (
 )
 
 
-class FakeLLM:
-    """Scripted LLM: returns queued responses in order and records calls."""
-
-    def __init__(self, responses: list[str]) -> None:
-        self._responses = list(responses)
-        self.calls: list[tuple[str, str]] = []  # (system, user)
-        self.model = "fake-llm"
-
-    def complete(self, system: str, user: str) -> str:
-        self.calls.append((system, user))
-        if not self._responses:
-            raise AssertionError("FakeLLM ran out of scripted responses")
-        return self._responses.pop(0)
-
-
 class FakeIstari:
-    """In-memory Istari platform: models, extraction jobs, artifacts, links.
+    """In-memory Istari platform: models, jobs (extraction + LLM), artifacts,
+    links, and stored credentials.
 
     Jobs complete on the next ``get_job_state`` poll by default; set
     ``auto_complete_jobs = False`` and call ``complete_job``/``fail_job`` to
@@ -45,16 +41,18 @@ class FakeIstari:
     def __init__(self) -> None:
         self._seq = itertools.count(1)
         self.models: dict[str, ModelInfo] = {}
-        self.extracted_text: dict[str, str] = {}  # model_id -> text.txt content
-        self.jobs: dict[str, dict[str, Any]] = {}  # job_id -> {model_id, state}
-        self.artifacts: dict[str, list[tuple[ArtifactInfo, dict[str, Any]]]] = {}
+        self.jobs: dict[str, dict[str, Any]] = {}  # id -> {model_id, state, kind}
+        self.artifacts: dict[str, list[tuple[ArtifactInfo, Any]]] = {}
         self.links: list[LinkInfo] = []
-        self.auto_complete_jobs = True
+        self.credentials: list[CredentialInfo] = []
         self.revision_owner: dict[str, str] = {}  # revision_id -> resource id
-        # call log for assertions (T2: correct linkage/provenance args)
+        self.auto_complete_jobs = True
+        self.llm_outputs: list[str] = []  # FIFO consumed by completing LLM jobs
+        # call logs for assertions (T2/T3: linkage, provenance, contract args)
         self.upload_calls: list[dict[str, Any]] = []
         self.link_calls: list[tuple[str, str]] = []
-        self.job_submissions: list[str] = []  # model ids, to assert no resubmits
+        self.job_submissions: list[str] = []  # extraction jobs, by model id
+        self.llm_calls: list[dict[str, Any]] = []  # submitted LLM jobs
 
     # ------------------------------------------------------- test helpers
 
@@ -69,22 +67,60 @@ class FakeIstari:
             revision_ids=rev_ids,
         )
         self.models[model_id] = info
-        self.extracted_text[model_id] = text
         self.artifacts[model_id] = []
         for rev_id in rev_ids:
             self.revision_owner[rev_id] = model_id
+        if text:
+            self._add_artifact(model_id, EXTRACT_TEXT_ARTIFACT, text)
         return info
 
-    def model_id_for_revision(self, revision_id: str) -> str:
-        if revision_id not in self.revision_owner:
-            raise IstariError(f"cannot resolve revision {revision_id}: not found")
-        return self.revision_owner[revision_id]
+    def add_credential(self, name: str, auth_type: str = "token") -> CredentialInfo:
+        cred = CredentialInfo(
+            credential_id=f"cred-{next(self._seq)}",
+            name=name,
+            auth_type=auth_type,
+            account_identity=f"{name}@example",
+        )
+        self.credentials.append(cred)
+        return cred
+
+    def default_credentials(self) -> CredentialSelection:
+        """One Istari + one LLM credential, created on first use."""
+        if not self.credentials:
+            self.add_credential("istari-pat", auth_type="istari")
+            self.add_credential("llm-key", auth_type="llm")
+        return CredentialSelection(
+            istari_credential_id=self.credentials[0].credential_id,
+            llm_credential_id=self.credentials[1].credential_id,
+        )
+
+    def queue_llm_output(self, raw: str) -> None:
+        self.llm_outputs.append(raw)
 
     def complete_job(self, job_id: str) -> None:
-        self.jobs[job_id]["state"] = JobState.COMPLETED
+        self._complete(job_id)
 
     def fail_job(self, job_id: str) -> None:
         self.jobs[job_id]["state"] = JobState.FAILED
+
+    def _add_artifact(self, model_id: str, name: str, payload: Any) -> ArtifactInfo:
+        artifact_id = f"artifact-{next(self._seq)}"
+        info = ArtifactInfo(
+            artifact_id=artifact_id, name=name, revision_id=f"{artifact_id}-rev-1"
+        )
+        self.revision_owner[info.revision_id] = artifact_id
+        self.artifacts[model_id].append((info, payload))
+        return info
+
+    def _complete(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+        job["state"] = JobState.COMPLETED
+        if job["kind"] == "llm" and not job.get("output_written"):
+            if not self.llm_outputs:
+                raise AssertionError("FakeIstari ran out of queued LLM outputs")
+            raw = self.llm_outputs.pop(0)
+            self._add_artifact(job["model_id"], LLM_OUTPUT_ARTIFACT, raw)
+            job["output_written"] = True
 
     # ------------------------------------------------- adapter interface
 
@@ -93,27 +129,67 @@ class FakeIstari:
             raise IstariError(f"cannot fetch model {model_id}: not found")
         return self.models[model_id]
 
+    def model_id_for_revision(self, revision_id: str) -> str:
+        if revision_id not in self.revision_owner:
+            raise IstariError(f"cannot resolve revision {revision_id}: not found")
+        return self.revision_owner[revision_id]
+
     def submit_extraction_job(self, model_id: str) -> str:
         if model_id not in self.models:
             raise IstariError(f"cannot submit extraction job for {model_id}: not found")
         job_id = f"job-{next(self._seq)}"
-        self.jobs[job_id] = {"model_id": model_id, "state": JobState.RUNNING}
+        self.jobs[job_id] = {"model_id": model_id, "state": JobState.RUNNING,
+                             "kind": "extract"}
         self.job_submissions.append(model_id)
         return job_id
+
+    def submit_llm_job(
+        self,
+        model_id: str,
+        function: str,
+        parameters: dict[str, Any],
+        credentials: CredentialSelection,
+    ) -> str:
+        if model_id not in self.models:
+            raise IstariError(f"cannot submit LLM job for {model_id}: not found")
+        job_id = f"llmjob-{next(self._seq)}"
+        self.jobs[job_id] = {"model_id": model_id, "state": JobState.RUNNING,
+                             "kind": "llm"}
+        self.llm_calls.append(
+            {"job_id": job_id, "model_id": model_id, "function": function,
+             "parameters": parameters, "credentials": credentials}
+        )
+        return job_id
+
+    def list_credentials(self) -> list[CredentialInfo]:
+        return list(self.credentials)
 
     def get_job_state(self, job_id: str) -> JobState:
         if job_id not in self.jobs:
             raise IstariError(f"cannot fetch job {job_id}: not found")
         job = self.jobs[job_id]
         if job["state"] is JobState.RUNNING and self.auto_complete_jobs:
-            job["state"] = JobState.COMPLETED
+            self._complete(job_id)
         return job["state"]
 
+    def read_text_artifact(self, model_id: str, name: str) -> str:
+        if model_id not in self.models:
+            raise IstariError(f"cannot fetch model {model_id}: not found")
+        for info, payload in reversed(self.artifacts[model_id]):
+            if info.name == name:
+                return payload if isinstance(payload, str) else json.dumps(payload)
+        raise IstariError(f"model {model_id} has no {name} artifact — did the job complete?")
+
+    def find_artifact(self, model_id: str, name: str) -> ArtifactInfo | None:
+        if model_id not in self.models:
+            raise IstariError(f"cannot fetch model {model_id}: not found")
+        for info, _payload in reversed(self.artifacts[model_id]):
+            if info.name == name:
+                return info
+        return None
+
     def get_extracted_text(self, model_id: str) -> str:
-        text = self.extracted_text.get(model_id)
-        if not text:
-            raise IstariError(f"model {model_id} has no text.txt artifact")
-        return text
+        return self.read_text_artifact(model_id, EXTRACT_TEXT_ARTIFACT)
 
     def upload_json_artifact(
         self,
@@ -125,12 +201,7 @@ class FakeIstari:
     ) -> ArtifactInfo:
         if model_id not in self.models:
             raise IstariError(f"cannot upload artifact {name}: model not found")
-        artifact_id = f"artifact-{next(self._seq)}"
-        info = ArtifactInfo(
-            artifact_id=artifact_id, name=name, revision_id=f"{artifact_id}-rev-1"
-        )
-        self.revision_owner[info.revision_id] = artifact_id
-        self.artifacts[model_id].append((info, payload))
+        info = self._add_artifact(model_id, name, payload)
         self.upload_calls.append(
             {"model_id": model_id, "name": name, "payload": payload,
              "description": description}
@@ -142,8 +213,11 @@ class FakeIstari:
     ) -> list[tuple[ArtifactInfo, dict[str, Any]]]:
         if model_id not in self.models:
             raise IstariError(f"cannot fetch model {model_id}: not found")
-        matching = [(i, p) for i, p in self.artifacts[model_id] if i.name == name]
-        return list(reversed(matching))  # newest first, like the real adapter
+        return [
+            (info, payload)
+            for info, payload in reversed(self.artifacts[model_id])
+            if info.name == name and isinstance(payload, dict)
+        ]
 
     def create_link(self, source_revision_id: str, produced_revision_id: str) -> LinkInfo:
         link = LinkInfo(

@@ -22,13 +22,17 @@ NOT_FOUND = "NOT_FOUND"
 class PipelineState(str, Enum):
     """Explicit per-response state machine (PRD §3.6b).
 
-    queued -> job_submitted -> text_retrieved -> llm_returned
-           -> validated -> uploaded -> done | failed
+    queued -> job_submitted -> text_retrieved -> llm_job_submitted
+           -> llm_returned -> validated -> uploaded -> done | failed
+
+    llm_returned means the LLM job's raw-output artifact exists on the
+    platform — that artifact IS the post-LLM checkpoint (no local cache).
     """
 
     QUEUED = "queued"
     JOB_SUBMITTED = "job_submitted"
     TEXT_RETRIEVED = "text_retrieved"
+    LLM_JOB_SUBMITTED = "llm_job_submitted"
     LLM_RETURNED = "llm_returned"
     VALIDATED = "validated"
     UPLOADED = "uploaded"
@@ -42,6 +46,7 @@ RESUMABLE_STATES = frozenset(
         PipelineState.QUEUED,
         PipelineState.JOB_SUBMITTED,
         PipelineState.TEXT_RETRIEVED,
+        PipelineState.LLM_JOB_SUBMITTED,
         PipelineState.LLM_RETURNED,
         PipelineState.VALIDATED,
         PipelineState.UPLOADED,
@@ -52,8 +57,12 @@ RESUMABLE_STATES = frozenset(
 _TRANSITIONS: dict[PipelineState, frozenset[PipelineState]] = {
     PipelineState.QUEUED: frozenset({PipelineState.JOB_SUBMITTED, PipelineState.FAILED}),
     PipelineState.JOB_SUBMITTED: frozenset({PipelineState.TEXT_RETRIEVED, PipelineState.FAILED}),
-    PipelineState.TEXT_RETRIEVED: frozenset({PipelineState.LLM_RETURNED, PipelineState.FAILED}),
-    PipelineState.LLM_RETURNED: frozenset({PipelineState.VALIDATED, PipelineState.FAILED}),
+    PipelineState.TEXT_RETRIEVED: frozenset({PipelineState.LLM_JOB_SUBMITTED, PipelineState.FAILED}),
+    PipelineState.LLM_JOB_SUBMITTED: frozenset({PipelineState.LLM_RETURNED, PipelineState.FAILED}),
+    # llm_returned -> llm_job_submitted is the retry-once resubmission (§4)
+    PipelineState.LLM_RETURNED: frozenset(
+        {PipelineState.VALIDATED, PipelineState.LLM_JOB_SUBMITTED, PipelineState.FAILED}
+    ),
     PipelineState.VALIDATED: frozenset({PipelineState.UPLOADED, PipelineState.FAILED}),
     PipelineState.UPLOADED: frozenset({PipelineState.DONE, PipelineState.FAILED}),
     PipelineState.DONE: frozenset(),
@@ -216,17 +225,20 @@ class ResponseRecord:
     """Per-response entry in the project file (PRD §3.6a) — pointers only.
 
     Table content is never stored here; it is re-fetched from Istari.
-    ``llm_cache_path`` points at the local scratch file holding raw LLM output
-    (PRD §3.6b: never re-pay for a crash between LLM return and upload).
+    ``llm_job_id`` is the post-LLM checkpoint evidence: a restart re-polls the
+    job and reads its raw-output artifact from the platform (PRD §3.6b —
+    never re-pay for a crash between LLM return and upload). ``llm_attempts``
+    persists the §4 retry-once counter so a crash cannot cause extra retries.
     """
 
     uuid: str
     revision: str | None = None
     state: PipelineState = PipelineState.QUEUED
     job_id: str | None = None
+    llm_job_id: str | None = None
+    llm_attempts: int = 0
     answers_artifact_uuid: str | None = None
     schema_version: str | None = None
-    llm_cache_path: str | None = None
     vendor: str | None = None
     error: str | None = None
 
@@ -238,8 +250,9 @@ class ResponseRecord:
         self.error = error if new is PipelineState.FAILED else None
         if new is PipelineState.QUEUED:  # retry from failed: drop stale evidence
             self.job_id = None
+            self.llm_job_id = None
+            self.llm_attempts = 0
             self.answers_artifact_uuid = None
-            self.llm_cache_path = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -247,9 +260,10 @@ class ResponseRecord:
             "revision": self.revision,
             "state": self.state.value,
             "job_id": self.job_id,
+            "llm_job_id": self.llm_job_id,
+            "llm_attempts": self.llm_attempts,
             "answers_artifact_uuid": self.answers_artifact_uuid,
             "schema_version": self.schema_version,
-            "llm_cache_path": self.llm_cache_path,
             "vendor": self.vendor,
             "error": self.error,
         }
@@ -261,9 +275,10 @@ class ResponseRecord:
             revision=d.get("revision"),
             state=PipelineState(d.get("state", "queued")),
             job_id=d.get("job_id"),
+            llm_job_id=d.get("llm_job_id"),
+            llm_attempts=int(d.get("llm_attempts", 0)),
             answers_artifact_uuid=d.get("answers_artifact_uuid"),
             schema_version=d.get("schema_version"),
-            llm_cache_path=d.get("llm_cache_path"),
             vendor=d.get("vendor"),
             error=d.get("error"),
         )

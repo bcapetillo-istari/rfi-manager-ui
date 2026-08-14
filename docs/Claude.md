@@ -20,13 +20,18 @@ any work. The PRD wins over this file if they ever conflict.**
   - /Users/benjamincapetillo/projects/istari-digital-internal-repos/model_diff_ui
   If these are cloned locally, they live in `./reference/` (git-ignored). Read
   them; never copy code wholesale without checking its license header.
-- LLM APIs: Anthropic messages API and a generic OpenAI-compatible chat endpoint
-  (both behind `llm_adapter.py`; see PRD §3.4).
+- LLM calls: ALL LLM calls are Istari platform jobs against the
+  `@istari_utils:rfi_manager` module (functions `extract_rfi_requirements`,
+  `extract_response_requirements`) — see `docs/LLM_Call_Flow.md` and PRD §3.4.
+  The app never calls an LLM API directly and holds no LLM API key; LLM
+  credentials are Istari Linked Accounts bound to jobs via `auth_bindings`.
 
 ## Architecture rules (violations = bug)
 
-- All Istari SDK calls live in `istari_adapter.py`. All LLM calls live in
-  `llm_adapter.py`. Nothing else imports the SDK or makes HTTP calls.
+- All Istari SDK calls live in `istari_adapter.py` — including LLM-function
+  job submission (LLM calls are platform jobs). Nothing else imports the SDK
+  or makes HTTP calls. Module/function identifiers live in one constants
+  block in `istari_adapter.py` until the deployed manifest fixes them.
 - `pipeline.py` contains orchestration and validation. It never imports Qt.
 - UI code (`ui/`) never calls adapters directly — it dispatches to QThreadPool
   workers and reacts to signals. The UI thread never blocks.
@@ -35,7 +40,8 @@ any work. The PRD wins over this file if they ever conflict.**
 - The platform is the source of truth; the local project file is a pointer cache
   written atomically at every state transition (PRD §3.6). If a feature would
   make the local machine hold unrecoverable data, the design is wrong.
-- Secrets (Istari token, LLM keys) come from environment variables only. Never
+- Secrets (the Istari token) come from environment variables only; LLM keys
+  never exist client-side (Linked Accounts, bound by credential id). Never
   write them to disk, project files, logs, or commits.
 
 ## Dev environment
