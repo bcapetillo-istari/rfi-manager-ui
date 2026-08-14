@@ -1,5 +1,28 @@
 # PROGRESS
 
+## M3 — Stage 2 + comparison table + resume/rebuild (done, 2026-08-14)
+
+Done:
+- `process_response` state machine (§3.6b): project saved atomically at every
+  transition; job id persisted before polling; raw LLM output checkpointed;
+  idempotency probe with force bypass (FR5); provenance + discovery links.
+- Resume (FR11): same loop continues from any intermediate state; dead job ids
+  and missing caches restart cleanly from queued with a session-log note.
+- `rebuild_from_platform` (FR12/§3.6c): highest schema_version wins (choice
+  logged), traverses discovery links, matches answers by (revision, schema).
+- UI: Stage2Page (single + batch input, per-response status, retry action,
+  force re-extract), ComparisonPage (QTableView + proxy: numeric-aware sort,
+  global search, all/NOT_FOUND/low-confidence/stale filters, em-dash + tint
+  rendering, FR7 detail pane with copyable provenance), MainWindow navigation,
+  Open project… with "Resume N incomplete extractions?" prompt, Open from RFI
+  UUID…. Batches run sequentially in one worker so project writes stay
+  single-threaded.
+- Headless smoke: stage1 → commit → 2-response batch → table (filters,
+  search, detail) → rebuild-from-UUID → reopen project. pytest: 88 passed
+  (T2 and T6 complete).
+
+Blocked: nothing.
+
 ## M2 — Stage 1 end-to-end (done, 2026-08-14)
 
 Done:

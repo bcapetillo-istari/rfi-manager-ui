@@ -785,6 +785,95 @@ def fetch_answers_artifact(
     )
 
 
+# --------------------------------------------------------------------------
+# Comparison rows (FR6/FR7): pure-python assembly shared by the Qt table
+# model and the CSV/XLSX/HTML exporters (FR8). Content always comes from
+# re-fetched platform artifacts, never from the project file.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ComparisonCell:
+    value: Any  # bool | number | str | NOT_FOUND; None when id absent
+    unit: str | None = None
+    quote: str = ""
+    page: int | None = None
+    confidence: str = "none"
+
+    @property
+    def is_not_found(self) -> bool:
+        return self.value == NOT_FOUND or self.value is None
+
+    @property
+    def is_low_confidence(self) -> bool:
+        return self.confidence in ("low", "none")
+
+    def display(self) -> str:
+        if self.is_not_found:
+            return "—"  # flagged em-dash (FR6)
+        if isinstance(self.value, bool):
+            return "yes" if self.value else "no"
+        return str(self.value)
+
+
+@dataclass(frozen=True)
+class ComparisonRow:
+    vendor: str
+    response_uuid: str
+    response_revision: str | None
+    answers_artifact_uuid: str | None
+    schema_version: str | None
+    stale: bool  # answered against an older schema (FR3/FR6)
+    cells: dict[str, ComparisonCell]  # keyed by requirement id
+
+    @property
+    def response_uuid_short(self) -> str:
+        return self.response_uuid[:8]
+
+    @property
+    def has_not_found(self) -> bool:
+        return any(c.is_not_found for c in self.cells.values())
+
+    @property
+    def has_low_confidence(self) -> bool:
+        return any(c.is_low_confidence for c in self.cells.values())
+
+
+def build_comparison_rows(
+    requirements: list[Requirement],
+    entries: list[tuple[ResponseRecord, AnswersArtifact]],
+    current_schema_version: str | None,
+) -> list[ComparisonRow]:
+    rows: list[ComparisonRow] = []
+    for record, artifact in entries:
+        by_id = {a.id: a for a in artifact.answers}
+        cells: dict[str, ComparisonCell] = {}
+        for req in requirements:
+            answer = by_id.get(req.id)
+            if answer is None:
+                cells[req.id] = ComparisonCell(value=None)
+            else:
+                cells[req.id] = ComparisonCell(
+                    value=answer.value, unit=answer.unit, quote=answer.quote,
+                    page=answer.page, confidence=answer.confidence,
+                )
+        rows.append(
+            ComparisonRow(
+                vendor=artifact.vendor or record.vendor or record.uuid,
+                response_uuid=record.uuid,
+                response_revision=record.revision,
+                answers_artifact_uuid=record.answers_artifact_uuid,
+                schema_version=artifact.schema_version,
+                stale=(
+                    current_schema_version is not None
+                    and artifact.schema_version != current_schema_version
+                ),
+                cells=cells,
+            )
+        )
+    return rows
+
+
 def _schema_sort_key(version: str) -> tuple:
     parts = version.split(".")
     return tuple(int(p) if p.isdigit() else -1 for p in parts), version
