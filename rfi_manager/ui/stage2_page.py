@@ -1,0 +1,115 @@
+"""Stage 2 page (FR4): single-UUID field plus batch box (one UUID per line),
+per-response status list, failure reasons with a retry action, and a
+"Force re-extract" toggle (FR5)."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+_COLUMNS = ["response UUID", "state", "detail"]
+
+
+class Stage2Page(QWidget):
+    ingest_requested = Signal(list, bool)  # (uuids, force)
+    retry_requested = Signal(str)  # response uuid
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Response UUID:"))
+        self.single_edit = QLineEdit()
+        self.single_edit.setPlaceholderText("Istari UUID of one response PDF")
+        layout.addWidget(self.single_edit)
+
+        layout.addWidget(QLabel("Batch (one UUID per line):"))
+        self.batch_edit = QPlainTextEdit()
+        self.batch_edit.setMaximumHeight(90)
+        layout.addWidget(self.batch_edit)
+
+        controls = QHBoxLayout()
+        self.force_check = QCheckBox("Force re-extract")
+        controls.addWidget(self.force_check)
+        self.ingest_button = QPushButton("Ingest responses")
+        self.ingest_button.clicked.connect(self._on_ingest)
+        controls.addWidget(self.ingest_button)
+        self.retry_button = QPushButton("Retry selected")
+        self.retry_button.setEnabled(False)
+        self.retry_button.clicked.connect(self._on_retry)
+        controls.addWidget(self.retry_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.status_table = QTableWidget(0, len(_COLUMNS))
+        self.status_table.setHorizontalHeaderLabels(_COLUMNS)
+        self.status_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.status_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.status_table.itemSelectionChanged.connect(self._on_selection)
+        layout.addWidget(self.status_table)
+
+    # -------------------------------------------------------------- input
+
+    def _collect_uuids(self) -> list[str]:
+        uuids = []
+        if self.single_edit.text().strip():
+            uuids.append(self.single_edit.text().strip())
+        for line in self.batch_edit.toPlainText().splitlines():
+            if line.strip():
+                uuids.append(line.strip())
+        seen: set[str] = set()
+        return [u for u in uuids if not (u in seen or seen.add(u))]
+
+    def _on_ingest(self) -> None:
+        uuids = self._collect_uuids()
+        if uuids:
+            self.ingest_requested.emit(uuids, self.force_check.isChecked())
+
+    def _on_retry(self) -> None:
+        row = self.status_table.currentRow()
+        if row >= 0:
+            uuid_item = self.status_table.item(row, 0)
+            if uuid_item:
+                self.retry_requested.emit(uuid_item.text())
+
+    def _on_selection(self) -> None:
+        row = self.status_table.currentRow()
+        state_item = self.status_table.item(row, 1) if row >= 0 else None
+        self.retry_button.setEnabled(bool(state_item and state_item.text() == "failed"))
+
+    # ------------------------------------------------------------- status
+
+    def set_busy(self, busy: bool) -> None:
+        self.ingest_button.setEnabled(not busy)
+
+    def _row_for(self, uuid: str) -> int:
+        for row in range(self.status_table.rowCount()):
+            item = self.status_table.item(row, 0)
+            if item and item.text() == uuid:
+                return row
+        row = self.status_table.rowCount()
+        self.status_table.insertRow(row)
+        self.status_table.setItem(row, 0, QTableWidgetItem(uuid))
+        self.status_table.setItem(row, 1, QTableWidgetItem(""))
+        self.status_table.setItem(row, 2, QTableWidgetItem(""))
+        return row
+
+    def update_status(self, uuid: str, state: str, detail: str) -> None:
+        row = self._row_for(uuid)
+        self.status_table.item(row, 1).setText(state)
+        self.status_table.item(row, 2).setText(detail)
+        self._on_selection()

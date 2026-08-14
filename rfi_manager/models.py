@@ -282,6 +282,10 @@ class Project:
     rfi_uuid: str
     rfi_revision: str | None = None
     requirements_artifact_uuid: str | None = None
+    # extra pointer beyond PRD §3.6a's minimum: the artifact's revision id,
+    # needed as the traversal root for rebuild links (§3.6c). Recoverable
+    # from the platform, so still cache-only.
+    requirements_artifact_revision: str | None = None
     schema_version: str | None = None
     responses: list[ResponseRecord] = field(default_factory=list)
 
@@ -297,6 +301,7 @@ class Project:
             "rfi_uuid": self.rfi_uuid,
             "rfi_revision": self.rfi_revision,
             "requirements_artifact_uuid": self.requirements_artifact_uuid,
+            "requirements_artifact_revision": self.requirements_artifact_revision,
             "schema_version": self.schema_version,
             "responses": [r.to_dict() for r in self.responses],
         }
@@ -310,6 +315,7 @@ class Project:
             rfi_uuid=d["rfi_uuid"],
             rfi_revision=d.get("rfi_revision"),
             requirements_artifact_uuid=d.get("requirements_artifact_uuid"),
+            requirements_artifact_revision=d.get("requirements_artifact_revision"),
             schema_version=d.get("schema_version"),
             responses=[ResponseRecord.from_dict(r) for r in d.get("responses", [])],
         )

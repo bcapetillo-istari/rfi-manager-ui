@@ -127,6 +127,21 @@ class IstariAdapter:
             revision_ids=tuple(r.id for r in revisions),
         )
 
+    def model_id_for_revision(self, revision_id: str) -> str:
+        """``client.get_revision(revision_id)`` -> ``client.get_file(file_id)``
+        -> ``.resource_id`` (the owning model id). Pattern from model_diff_ui's
+        ``model_id_from_rev_id``; used by rebuild-from-platform traversal
+        (PRD §3.6c) to resolve linked response file revisions to models."""
+        try:
+            revision = self._client.get_revision(revision_id)
+            file = self._client.get_file(revision.file_id)
+        except Exception as e:
+            raise IstariError(f"cannot resolve revision {revision_id}: {e}") from e
+        resource_id = getattr(file, "resource_id", None)
+        if not resource_id:
+            raise IstariError(f"revision {revision_id} has no owning resource")
+        return resource_id
+
     # --------------------------------------------------------------- jobs
 
     def submit_extraction_job(self, model_id: str) -> str:

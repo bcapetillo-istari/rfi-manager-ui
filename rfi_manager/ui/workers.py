@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 class WorkerSignals(QObject):
     progress = Signal(str, str)  # (state, detail) per PRD §3.2
+    log = Signal(str)  # session-log lines from pipeline log callbacks (FR10)
     finished = Signal(object)  # the callable's return value
     failed = Signal(str)  # user-actionable reason (FR10)
 
@@ -27,6 +28,7 @@ class Worker(QRunnable):
         fn: Callable[..., Any],
         *args: Any,
         send_progress: bool = False,
+        send_log: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__()
@@ -36,6 +38,8 @@ class Worker(QRunnable):
         self._kwargs = kwargs
         if send_progress:
             self._kwargs["progress"] = self.signals.progress.emit
+        if send_log:
+            self._kwargs["log"] = self.signals.log.emit
 
     @Slot()
     def run(self) -> None:

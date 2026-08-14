@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from .istari_adapter import ArtifactInfo, IstariError, JobState, ModelInfo
+from .llm_adapter import LLMError
 from .models import (
     CONFIDENCE_LEVELS,
     NOT_FOUND,
@@ -463,3 +464,481 @@ def next_schema_version(current: str | None) -> str:
     if head and tail.isdigit():
         return f"{head}.{int(tail) + 1}"
     return f"{current}.1"
+
+
+# --------------------------------------------------------------------------
+# Stage 2: per-response pipeline (explicit state machine, PRD §3.6b).
+# The project file is saved atomically at EVERY transition.
+# --------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402  (grouped with stage-2 additions)
+
+from .models import (  # noqa: E402
+    AnswersArtifact,
+    PipelineState,
+    Project,
+    ResponseRecord,
+)
+from .persistence import (  # noqa: E402
+    cache_llm_output,
+    clear_cached_llm_output,
+    load_cached_llm_output,
+    save_project,
+)
+from .prompts import prompt_b, prompt_b_version  # noqa: E402
+
+LogCallback = Callable[[str], None]
+
+
+def _log(log: LogCallback | None, message: str) -> None:
+    if log is not None:
+        log(message)
+
+
+def find_existing_answers(
+    istari: IstariClient,
+    response_uuid: str,
+    response_revision: str,
+    schema_version: str,
+) -> tuple[ArtifactInfo, dict[str, Any]] | None:
+    """FR5 idempotency probe: newest answers artifact on the response model
+    matching (response revision, schema_version), or None."""
+    for info, payload in istari.list_json_artifacts(response_uuid, ANSWERS_ARTIFACT_NAME):
+        if (
+            payload.get("response_revision") == response_revision
+            and payload.get("schema_version") == schema_version
+        ):
+            return info, payload
+    return None
+
+
+def _find_answers_revision(
+    istari: IstariClient, response_uuid: str, artifact_id: str
+) -> str | None:
+    for info, _payload in istari.list_json_artifacts(response_uuid, ANSWERS_ARTIFACT_NAME):
+        if info.artifact_id == artifact_id:
+            return info.revision_id
+    return None
+
+
+def _link_exists(istari: IstariClient, left: str, right: str) -> bool:
+    return any(
+        link.left_revision_id == left and link.right_revision_id == right
+        for link in istari.list_links(left)
+    )
+
+
+def _restart_from_queued(
+    record: ResponseRecord,
+    project: Project,
+    project_path: Path | str,
+    reason: str,
+    log: LogCallback | None,
+) -> None:
+    """FR11: checkpoint evidence unusable -> clean restart with a log note."""
+    _log(log, f"response {record.uuid}: {reason} — restarting from queued")
+    record.transition(PipelineState.FAILED, error=reason)
+    record.transition(PipelineState.QUEUED)
+    save_project(project, project_path)
+
+
+def process_response(
+    istari: IstariClient,
+    llm: LLMClient,
+    project: Project,
+    project_path: Path | str,
+    record: ResponseRecord,
+    requirements_artifact: RequirementsArtifact,
+    *,
+    force: bool = False,
+    poll_interval_s: float = 3.0,
+    job_timeout_s: float = 900.0,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
+) -> ResponseRecord:
+    """Drive one response through the state machine to done|failed (FR4/FR5,
+    §3.6b). Works identically for fresh runs and resumes (FR11): each step
+    continues from the record's persisted state and checkpoints evidence.
+
+    ``record`` must already be in ``project.responses``. Raises nothing on
+    pipeline failures — the record ends FAILED with ``record.error`` set;
+    only programming errors propagate.
+    """
+    schema_version = requirements_artifact.schema_version
+    requirements = requirements_artifact.requirements
+
+    # in-memory carry between steps within this call (never persisted)
+    validated: list[Answer] | None = None
+
+    while record.state not in (PipelineState.DONE, PipelineState.FAILED):
+        try:
+            if record.state is PipelineState.QUEUED:
+                _notify(progress, "queued", record.uuid)
+                info = istari.get_model_info(record.uuid)
+                if record.revision is None:
+                    record.revision = info.latest_revision_id
+                if record.vendor is None:
+                    record.vendor = info.name
+                if not force:
+                    existing = find_existing_answers(
+                        istari, record.uuid, record.revision, schema_version
+                    )
+                    if existing is not None:
+                        info_art, _payload = existing
+                        record.answers_artifact_uuid = info_art.artifact_id
+                        record.schema_version = schema_version
+                        for state in (
+                            PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
+                            PipelineState.LLM_RETURNED, PipelineState.VALIDATED,
+                            PipelineState.UPLOADED, PipelineState.DONE,
+                        ):
+                            record.transition(state)
+                        save_project(project, project_path)
+                        _log(log, f"response {record.uuid}: existing answers artifact "
+                                  f"{info_art.artifact_id} matches — skipped (FR5)")
+                        _notify(progress, "done", "loaded existing answers")
+                        return record
+                record.job_id = istari.submit_extraction_job(record.uuid)
+                record.transition(PipelineState.JOB_SUBMITTED)
+                save_project(project, project_path)
+                _log(log, f"response {record.uuid}: extraction job {record.job_id}")
+
+            elif record.state is PipelineState.JOB_SUBMITTED:
+                assert record.job_id is not None
+                try:
+                    wait_for_job(
+                        istari, record.job_id,
+                        poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
+                        progress=progress,
+                    )
+                except IstariError as e:  # job id no longer usable (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         f"job {record.job_id} unusable ({e})", log)
+                    continue
+                record.transition(PipelineState.TEXT_RETRIEVED)
+                save_project(project, project_path)
+
+            elif record.state is PipelineState.TEXT_RETRIEVED:
+                _notify(progress, "llm", record.uuid)
+                text = istari.get_extracted_text(record.uuid)
+                result, raw = call_llm_validated(
+                    llm, prompt_b(requirements, text),
+                    lambda t: validate_answers(t, requirements),
+                )
+                record.llm_cache_path = str(
+                    cache_llm_output(project_path, record.uuid, raw)
+                )
+                validated = result.items if result.ok else None
+                if not result.ok:
+                    record.transition(
+                        PipelineState.FAILED,
+                        error="LLM answers failed validation after retry:\n"
+                        + "\n".join(result.errors),
+                    )
+                    save_project(project, project_path)
+                    break
+                for warning in result.warnings:
+                    _log(log, f"response {record.uuid}: warning: {warning}")
+                record.transition(PipelineState.LLM_RETURNED)
+                save_project(project, project_path)
+
+            elif record.state is PipelineState.LLM_RETURNED:
+                _notify(progress, "validating", record.uuid)
+                raw = (
+                    load_cached_llm_output(record.llm_cache_path)
+                    if record.llm_cache_path else None
+                )
+                if raw is None:  # cache evidence unusable (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         "cached LLM output missing", log)
+                    continue
+                result = validate_answers(raw, requirements)
+                if not result.ok:
+                    record.transition(
+                        PipelineState.FAILED,
+                        error="cached LLM answers failed validation:\n"
+                        + "\n".join(result.errors),
+                    )
+                    save_project(project, project_path)
+                    break
+                validated = result.items
+                record.transition(PipelineState.VALIDATED)
+                save_project(project, project_path)
+
+            elif record.state is PipelineState.VALIDATED:
+                _notify(progress, "uploading", record.uuid)
+                if validated is None:  # resuming: rebuild from the scratch cache
+                    raw = (
+                        load_cached_llm_output(record.llm_cache_path)
+                        if record.llm_cache_path else None
+                    )
+                    if raw is None:
+                        _restart_from_queued(record, project, project_path,
+                                             "cached LLM output missing", log)
+                        continue
+                    result = validate_answers(raw, requirements)
+                    if not result.ok:
+                        record.transition(
+                            PipelineState.FAILED,
+                            error="cached LLM answers failed validation:\n"
+                            + "\n".join(result.errors),
+                        )
+                        save_project(project, project_path)
+                        break
+                    validated = result.items
+                artifact = AnswersArtifact(
+                    response_uuid=record.uuid,
+                    response_revision=record.revision or "",
+                    vendor=record.vendor or record.uuid,
+                    schema_version=schema_version,
+                    extracted_at=datetime.now(timezone.utc).isoformat(),
+                    llm_model=getattr(llm, "model", "unknown"),
+                    prompt_version=prompt_b_version(schema_version),
+                    answers=validated,
+                )
+                info_art = istari.upload_json_artifact(
+                    record.uuid, ANSWERS_ARTIFACT_NAME, artifact.to_dict(),
+                    description=f"RFI answers (schema v{schema_version})",
+                )
+                record.answers_artifact_uuid = info_art.artifact_id
+                record.schema_version = schema_version
+                record.transition(PipelineState.UPLOADED)
+                save_project(project, project_path)
+                _log(log, f"response {record.uuid}: answers artifact "
+                          f"{info_art.artifact_id} uploaded")
+
+            elif record.state is PipelineState.UPLOADED:
+                assert record.answers_artifact_uuid is not None
+                answers_rev = _find_answers_revision(
+                    istari, record.uuid, record.answers_artifact_uuid
+                )
+                if answers_rev is None:  # upload evidence unusable (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         "uploaded answers artifact not found", log)
+                    continue
+                # provenance: response file revision -> answers artifact revision
+                if record.revision and not _link_exists(istari, record.revision, answers_rev):
+                    istari.create_link(record.revision, answers_rev)
+                # discovery: requirements artifact revision -> response revision
+                # (rebuild-from-platform traversal root, §3.6c)
+                req_rev = project.requirements_artifact_revision
+                if req_rev and record.revision and not _link_exists(istari, req_rev, record.revision):
+                    istari.create_link(req_rev, record.revision)
+                record.transition(PipelineState.DONE)
+                save_project(project, project_path)
+                clear_cached_llm_output(record.llm_cache_path)
+                record.llm_cache_path = None
+                save_project(project, project_path)
+                _notify(progress, "done", record.uuid)
+                _log(log, f"response {record.uuid}: done")
+
+        except (IstariError, LLMError, PipelineError) as e:
+            record.transition(PipelineState.FAILED, error=str(e))
+            save_project(project, project_path)
+            _notify(progress, "failed", str(e))
+            _log(log, f"response {record.uuid}: FAILED: {e}")
+    return record
+
+
+def retry_response(
+    record: ResponseRecord, project: Project, project_path: Path | str
+) -> None:
+    """FR4 retry action: a failed record goes back to queued (evidence
+    cleared by the state machine) and is persisted."""
+    record.transition(PipelineState.QUEUED)
+    save_project(project, project_path)
+
+
+def fetch_requirements_artifact(
+    istari: IstariClient, project: Project
+) -> RequirementsArtifact:
+    """Reload the committed schema of record from the platform (startup
+    resume, FR11 — table content is never stored locally)."""
+    if project.requirements_artifact_uuid is None:
+        raise PipelineError("project has no committed requirements artifact")
+    for info, payload in istari.list_json_artifacts(
+        project.rfi_uuid, REQUIREMENTS_ARTIFACT_NAME
+    ):
+        if info.artifact_id == project.requirements_artifact_uuid:
+            if project.requirements_artifact_revision is None:
+                project.requirements_artifact_revision = info.revision_id
+            return RequirementsArtifact.from_dict(payload)
+    raise PipelineError(
+        f"requirements artifact {project.requirements_artifact_uuid} not found "
+        f"on RFI {project.rfi_uuid}"
+    )
+
+
+def fetch_answers_artifact(
+    istari: IstariClient, record: ResponseRecord
+) -> AnswersArtifact:
+    """Re-fetch a response's committed answers from the platform (the table
+    is always rebuilt from Istari — PRD §3.6a)."""
+    if record.answers_artifact_uuid is None:
+        raise PipelineError(f"response {record.uuid} has no answers artifact")
+    for info, payload in istari.list_json_artifacts(record.uuid, ANSWERS_ARTIFACT_NAME):
+        if info.artifact_id == record.answers_artifact_uuid:
+            return AnswersArtifact.from_dict(payload)
+    raise PipelineError(
+        f"answers artifact {record.answers_artifact_uuid} not found on "
+        f"response {record.uuid}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Comparison rows (FR6/FR7): pure-python assembly shared by the Qt table
+# model and the CSV/XLSX/HTML exporters (FR8). Content always comes from
+# re-fetched platform artifacts, never from the project file.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ComparisonCell:
+    value: Any  # bool | number | str | NOT_FOUND; None when id absent
+    unit: str | None = None
+    quote: str = ""
+    page: int | None = None
+    confidence: str = "none"
+
+    @property
+    def is_not_found(self) -> bool:
+        return self.value == NOT_FOUND or self.value is None
+
+    @property
+    def is_low_confidence(self) -> bool:
+        return self.confidence in ("low", "none")
+
+    def display(self) -> str:
+        if self.is_not_found:
+            return "—"  # flagged em-dash (FR6)
+        if isinstance(self.value, bool):
+            return "yes" if self.value else "no"
+        return str(self.value)
+
+
+@dataclass(frozen=True)
+class ComparisonRow:
+    vendor: str
+    response_uuid: str
+    response_revision: str | None
+    answers_artifact_uuid: str | None
+    schema_version: str | None
+    stale: bool  # answered against an older schema (FR3/FR6)
+    cells: dict[str, ComparisonCell]  # keyed by requirement id
+
+    @property
+    def response_uuid_short(self) -> str:
+        return self.response_uuid[:8]
+
+    @property
+    def has_not_found(self) -> bool:
+        return any(c.is_not_found for c in self.cells.values())
+
+    @property
+    def has_low_confidence(self) -> bool:
+        return any(c.is_low_confidence for c in self.cells.values())
+
+
+def build_comparison_rows(
+    requirements: list[Requirement],
+    entries: list[tuple[ResponseRecord, AnswersArtifact]],
+    current_schema_version: str | None,
+) -> list[ComparisonRow]:
+    rows: list[ComparisonRow] = []
+    for record, artifact in entries:
+        by_id = {a.id: a for a in artifact.answers}
+        cells: dict[str, ComparisonCell] = {}
+        for req in requirements:
+            answer = by_id.get(req.id)
+            if answer is None:
+                cells[req.id] = ComparisonCell(value=None)
+            else:
+                cells[req.id] = ComparisonCell(
+                    value=answer.value, unit=answer.unit, quote=answer.quote,
+                    page=answer.page, confidence=answer.confidence,
+                )
+        rows.append(
+            ComparisonRow(
+                vendor=artifact.vendor or record.vendor or record.uuid,
+                response_uuid=record.uuid,
+                response_revision=record.revision,
+                answers_artifact_uuid=record.answers_artifact_uuid,
+                schema_version=artifact.schema_version,
+                stale=(
+                    current_schema_version is not None
+                    and artifact.schema_version != current_schema_version
+                ),
+                cells=cells,
+            )
+        )
+    return rows
+
+
+def _schema_sort_key(version: str) -> tuple:
+    parts = version.split(".")
+    return tuple(int(p) if p.isdigit() else -1 for p in parts), version
+
+
+def rebuild_from_platform(
+    istari: IstariClient,
+    rfi_uuid: str,
+    *,
+    log: LogCallback | None = None,
+) -> tuple[Project, RequirementsArtifact]:
+    """FR12 / §3.6c: reconstruct a project from the platform alone.
+
+    Locate the latest requirements artifact on the RFI model (highest
+    schema_version wins; the choice is logged), then traverse links from its
+    revision to response file revisions, and match each response's answers
+    artifact by (response revision, schema_version).
+    """
+    istari.get_model_info(rfi_uuid)  # fail fast on a bad UUID
+    candidates = istari.list_json_artifacts(rfi_uuid, REQUIREMENTS_ARTIFACT_NAME)
+    if not candidates:
+        raise PipelineError(f"RFI {rfi_uuid} has no {REQUIREMENTS_ARTIFACT_NAME} artifact")
+    if len(candidates) > 1:
+        _log(log, f"RFI {rfi_uuid}: {len(candidates)} requirements artifacts found")
+    chosen_info, chosen_payload = max(
+        candidates, key=lambda c: _schema_sort_key(c[1].get("schema_version", ""))
+    )
+    requirements_artifact = RequirementsArtifact.from_dict(chosen_payload)
+    _log(log, f"chose requirements artifact {chosen_info.artifact_id} "
+              f"(schema v{requirements_artifact.schema_version})")
+
+    project = Project(
+        rfi_uuid=rfi_uuid,
+        rfi_revision=requirements_artifact.rfi_revision,
+        requirements_artifact_uuid=chosen_info.artifact_id,
+        requirements_artifact_revision=chosen_info.revision_id,
+        schema_version=requirements_artifact.schema_version,
+    )
+
+    for link in istari.list_links(chosen_info.revision_id):
+        if link.left_revision_id != chosen_info.revision_id:
+            continue  # the rfi->requirements edge, not a discovery edge
+        response_revision = link.right_revision_id
+        try:
+            response_uuid = istari.model_id_for_revision(response_revision)
+        except IstariError as e:
+            _log(log, f"skipping linked revision {response_revision}: {e}")
+            continue
+        existing = find_existing_answers(
+            istari, response_uuid, response_revision,
+            requirements_artifact.schema_version,
+        )
+        if existing is None:
+            _log(log, f"response {response_uuid}: no matching answers artifact; skipped")
+            continue
+        info_art, payload = existing
+        record = ResponseRecord(
+            uuid=response_uuid,
+            revision=response_revision,
+            state=PipelineState.DONE,
+            answers_artifact_uuid=info_art.artifact_id,
+            schema_version=payload.get("schema_version"),
+            vendor=payload.get("vendor"),
+        )
+        project.responses.append(record)
+        _log(log, f"recovered response {response_uuid} "
+                  f"(answers artifact {info_art.artifact_id})")
+    return project, requirements_artifact
