@@ -3,7 +3,7 @@
 PySide6 desktop app that automates RFI response comparison on the Istari Platform:
 extract requirements from an RFI PDF, extract answers from response PDFs (Istari
 extraction + LLM), upload everything back to Istari with links, display in a
-sortable/filterable table. **The full spec is `PRD-rfi-manager.md` — read it before
+sortable/filterable table. **The full spec is `docs/PRD.md` — read it before
 any work. The PRD wins over this file if they ever conflict.**
 
 ## Reference material
