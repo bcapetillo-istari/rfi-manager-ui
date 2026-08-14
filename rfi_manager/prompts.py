@@ -114,3 +114,13 @@ def prompt_b(requirements: list[Requirement], response_text: str) -> str:
 def with_retry_errors(prompt: str, errors: list[str]) -> str:
     """Append validation errors for the single retry pass (PRD §4)."""
     return prompt + _RETRY_SUFFIX.format(errors="\n".join(f"- {e}" for e in errors))
+
+
+def prompt_b_version(schema_version: str) -> str:
+    """Version stamp for Prompt B artifacts (FR9, T3).
+
+    Prompt B is generated from the committed requirements, so its effective
+    version is the template version PLUS the schema version it was generated
+    from — changing the schema changes the stamp.
+    """
+    return f"{PROMPT_VERSION}+schema-{schema_version}"

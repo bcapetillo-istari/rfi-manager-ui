@@ -1,4 +1,4 @@
-"""Orchestration and validation (PRD §4). Never imports Qt.
+"""Orchestration and validation (PRD §4, §3.2). Never imports Qt.
 
 All LLM output passes through the validators here before anything is uploaded:
 an artifact that failed validation is never uploaded (PRD §4).
@@ -8,17 +8,21 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
+from .istari_adapter import ArtifactInfo, IstariError, JobState, ModelInfo
 from .models import (
     CONFIDENCE_LEVELS,
     NOT_FOUND,
     REQUIREMENT_TYPES,
     Answer,
     Requirement,
+    RequirementsArtifact,
 )
-from .prompts import SYSTEM_PROMPT, with_retry_errors
+from .prompts import PROMPT_VERSION, SYSTEM_PROMPT, prompt_a, with_retry_errors
 
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
 
@@ -289,3 +293,173 @@ def call_llm_validated(
     raw2 = llm.complete(system_prompt, retry_prompt)
     result2 = validator(raw2)
     return result2, raw2
+
+
+# --------------------------------------------------------------------------
+# Orchestration (Stage 1). Progress states per PRD §3.2:
+# queued -> extracting -> llm -> validating -> uploading -> done | failed
+# --------------------------------------------------------------------------
+
+ProgressCallback = Callable[[str, str], None]  # (state, detail)
+
+
+class PipelineError(Exception):
+    """A stage failed with a user-actionable reason (FR10)."""
+
+
+class IstariClient(Protocol):
+    """The istari_adapter interface the pipeline depends on."""
+
+    def get_model_info(self, model_id: str) -> ModelInfo: ...
+    def submit_extraction_job(self, model_id: str) -> str: ...
+    def get_job_state(self, job_id: str) -> JobState: ...
+    def get_extracted_text(self, model_id: str) -> str: ...
+    def upload_json_artifact(
+        self, model_id: str, name: str, payload: dict[str, Any],
+        *, description: str | None = None,
+    ) -> ArtifactInfo: ...
+    def list_json_artifacts(
+        self, model_id: str, name: str
+    ) -> list[tuple[ArtifactInfo, dict[str, Any]]]: ...
+    def create_link(self, source_revision_id: str, produced_revision_id: str): ...
+    def list_links(self, revision_id: str): ...
+
+
+REQUIREMENTS_ARTIFACT_NAME = "rfi-requirements.json"
+ANSWERS_ARTIFACT_NAME = "rfi-answers.json"
+
+
+def _notify(progress: ProgressCallback | None, state: str, detail: str) -> None:
+    if progress is not None:
+        progress(state, detail)
+
+
+def wait_for_job(
+    istari: IstariClient,
+    job_id: str,
+    *,
+    poll_interval_s: float = 3.0,
+    timeout_s: float = 900.0,
+    progress: ProgressCallback | None = None,
+) -> None:
+    """Poll ``get_job_state(job_id)`` until terminal; raises PipelineError on
+    failure/cancel/timeout. Restart-safe: callers persist the job id before
+    calling this, so a crashed run re-polls instead of resubmitting (§3.6b)."""
+    start = time.monotonic()
+    while True:
+        state = istari.get_job_state(job_id)
+        if state is JobState.COMPLETED:
+            return
+        if state in (JobState.FAILED, JobState.CANCELED):
+            raise PipelineError(f"extraction job {job_id} ended as {state.value}")
+        elapsed = time.monotonic() - start
+        if elapsed > timeout_s:
+            raise PipelineError(
+                f"extraction job {job_id} still {state.value} after {int(elapsed)}s"
+            )
+        _notify(progress, "extracting", f"job {job_id}: {state.value}")
+        time.sleep(poll_interval_s)
+
+
+@dataclass
+class Stage1Result:
+    """Extraction output handed to the review screen (FR1/FR2)."""
+
+    rfi: ModelInfo
+    rfi_revision_id: str
+    requirements: list[Requirement]
+    warnings: list[str]
+    raw_llm_output: str
+    llm_model: str
+
+
+def run_stage1_extraction(
+    istari: IstariClient,
+    llm: LLMClient,
+    rfi_uuid: str,
+    *,
+    revision_id: str | None = None,
+    poll_interval_s: float = 3.0,
+    job_timeout_s: float = 900.0,
+    progress: ProgressCallback | None = None,
+) -> Stage1Result:
+    """Stage 1 up to (not including) commit: run Istari's PDF extraction on
+    the RFI, send text + Prompt A to the LLM, validate into Requirements.
+    Raises PipelineError with the reason on any failure (FR10)."""
+    _notify(progress, "queued", f"fetching RFI {rfi_uuid}")
+    rfi = istari.get_model_info(rfi_uuid)
+    if revision_id is not None and revision_id not in rfi.revision_ids:
+        raise PipelineError(f"revision {revision_id} not found on RFI {rfi_uuid}")
+    rfi_revision_id = revision_id or rfi.latest_revision_id
+
+    _notify(progress, "extracting", "submitting extraction job")
+    job_id = istari.submit_extraction_job(rfi_uuid)
+    wait_for_job(
+        istari, job_id,
+        poll_interval_s=poll_interval_s, timeout_s=job_timeout_s, progress=progress,
+    )
+    text = istari.get_extracted_text(rfi_uuid)
+
+    _notify(progress, "llm", "extracting requirements with LLM")
+    result, raw = call_llm_validated(llm, prompt_a(text), validate_requirements)
+    _notify(progress, "validating", f"{len(result.items)} requirements")
+    if not result.ok:
+        raise PipelineError(
+            "LLM requirements failed validation after retry:\n"
+            + "\n".join(result.errors)
+        )
+    return Stage1Result(
+        rfi=rfi,
+        rfi_revision_id=rfi_revision_id,
+        requirements=result.items,
+        warnings=result.warnings,
+        raw_llm_output=raw,
+        llm_model=getattr(llm, "model", "unknown"),
+    )
+
+
+def commit_requirements(
+    istari: IstariClient,
+    *,
+    rfi: ModelInfo,
+    rfi_revision_id: str,
+    requirements: list[Requirement],
+    schema_version: str,
+    llm_model: str,
+    progress: ProgressCallback | None = None,
+) -> tuple[RequirementsArtifact, ArtifactInfo]:
+    """Commit reviewed requirements (FR2): upload the requirements artifact to
+    the RFI model and link it to the source RFI revision. Never called with
+    invalid requirements — the review screen re-validates before commit."""
+    artifact = RequirementsArtifact(
+        rfi_uuid=rfi.model_id,
+        rfi_revision=rfi_revision_id,
+        schema_version=schema_version,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        llm_model=llm_model,
+        prompt_version=PROMPT_VERSION,
+        requirements=requirements,
+    )
+    _notify(progress, "uploading", REQUIREMENTS_ARTIFACT_NAME)
+    try:
+        info = istari.upload_json_artifact(
+            rfi.model_id,
+            REQUIREMENTS_ARTIFACT_NAME,
+            artifact.to_dict(),
+            description=f"RFI requirements schema v{schema_version}",
+        )
+        istari.create_link(rfi_revision_id, info.revision_id)
+    except IstariError as e:
+        raise PipelineError(str(e)) from e
+    _notify(progress, "done", f"requirements artifact {info.artifact_id}")
+    return artifact, info
+
+
+def next_schema_version(current: str | None) -> str:
+    """Bumped schema_version for FR3 re-runs: '1.0' -> '1.1'; fallback '1.0'."""
+    if not current:
+        return "1.0"
+    head, _, tail = current.rpartition(".")
+    if head and tail.isdigit():
+        return f"{head}.{int(tail) + 1}"
+    return f"{current}.1"
