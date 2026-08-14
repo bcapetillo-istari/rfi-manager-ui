@@ -1,0 +1,334 @@
+"""Istari platform adapter. ALL Istari SDK calls live here (CLAUDE.md rule).
+
+Written against ``istari-digital-client`` 11.2.0, following the usage patterns
+in the internal reference repos (istari-digital-examples, model_diff_ui):
+``Configuration``/``Client`` auth, ``add_job`` with the ``@istari:extract`` /
+``open_pdf`` function for PDF extraction, ``get_job`` polling, ``model
+.artifacts`` + ``read_text``/``read_json`` for artifact content, path-based
+``add_artifact`` uploads, and the v3 ``V3Client`` revision-relationship API
+for links (PRD §3.6c).
+
+Assumptions noted from SDK introspection (flagged in PROGRESS.md):
+- Artifacts cannot be listed per job; we match by artifact name and iterate
+  ``reversed(model.artifacts)`` for the most recent (known SDK gap).
+- Links are between *revisions*, not models: we link artifact revisions to
+  source file revisions via ``create_revision_relationship``.
+- The relationship type id is resolved by name from
+  ``list_revision_relationship_types`` at first use.
+
+The pipeline and UI depend only on this module's small dataclasses and
+methods — never on SDK types.
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+from .config import IstariConfig
+
+
+class IstariError(Exception):
+    """Raised when a platform operation fails."""
+
+
+class JobState(str, Enum):
+    """Adapter-level job status (mapped from SDK JobStatusName)."""
+
+    RUNNING = "running"  # Created/Pending/Claimed/Validating/Running/Uploading
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """Pointer info for a platform model/file."""
+
+    model_id: str
+    name: str
+    file_id: str
+    latest_revision_id: str
+    revision_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ArtifactInfo:
+    """Pointer info for an uploaded/discovered artifact."""
+
+    artifact_id: str
+    name: str
+    revision_id: str
+
+
+@dataclass(frozen=True)
+class LinkInfo:
+    """One revision-relationship edge (PRD §3.6c traversal)."""
+
+    link_id: str
+    type_name: str
+    left_revision_id: str
+    right_revision_id: str
+
+
+# The Istari extraction function produces text.txt among its artifacts
+# (verified against the extract-pdf reference notebook).
+_EXTRACT_FUNCTION = "@istari:extract"
+_EXTRACT_TOOL = "open_pdf"
+_EXTRACT_TOOL_VERSION = "1.0.0"
+_EXTRACT_OS = "Ubuntu 22.04"
+_EXTRACT_TEXT_ARTIFACT = "text.txt"
+
+# Relationship type used to link uploaded artifacts to their source revision.
+_LINK_TYPE_NAME = "produces"
+
+_RUNNING_STATUSES = {"Created", "Pending", "Claimed", "Validating", "Running", "Uploading"}
+
+
+class IstariAdapter:
+    """Real adapter over the official Istari Python client."""
+
+    def __init__(self, config: IstariConfig) -> None:
+        """Build ``Configuration(registry_url=..., registry_auth_token=...)``
+        and instantiate both ``Client`` (v2 surface) and ``V3Client`` (needed
+        for revision relationships, which are not on ``Client``)."""
+        from istari_digital_client import Client, Configuration, V3Client
+
+        sdk_config = Configuration(
+            registry_url=config.base_url,
+            registry_auth_token=config.token,
+        )
+        self._client = Client(config=sdk_config)
+        self._v3 = V3Client(sdk_config)
+        self._link_type_id: str | None = None
+
+    # ------------------------------------------------------------- models
+
+    def get_model_info(self, model_id: str) -> ModelInfo:
+        """``client.get_model(model_id)`` -> pointer info; raises IstariError
+        if the model does not exist or has no revisions."""
+        try:
+            model = self._client.get_model(model_id)
+        except Exception as e:  # SDK raises assorted ApiException types
+            raise IstariError(f"cannot fetch model {model_id}: {e}") from e
+        revisions = model.file.revisions or []
+        if not revisions:
+            raise IstariError(f"model {model_id} has no revisions")
+        return ModelInfo(
+            model_id=model_id,
+            name=model.display_name or revisions[0].name,
+            file_id=model.file.id,
+            latest_revision_id=revisions[-1].id,
+            revision_ids=tuple(r.id for r in revisions),
+        )
+
+    # --------------------------------------------------------------- jobs
+
+    def submit_extraction_job(self, model_id: str) -> str:
+        """``client.add_job(model_id, function="@istari:extract",
+        tool_name="open_pdf", ...)`` -> job id. Runs Istari's PDF
+        data-extraction function on the model's latest revision."""
+        try:
+            job = self._client.add_job(
+                model_id,
+                function=_EXTRACT_FUNCTION,
+                tool_name=_EXTRACT_TOOL,
+                tool_version=_EXTRACT_TOOL_VERSION,
+                operating_system=_EXTRACT_OS,
+                parameters={},
+            )
+        except Exception as e:
+            raise IstariError(f"cannot submit extraction job for {model_id}: {e}") from e
+        return job.id
+
+    def get_job_state(self, job_id: str) -> JobState:
+        """``client.get_job(job_id)`` -> mapped JobState. Restart-safe: the
+        pipeline re-polls a persisted job id instead of resubmitting (§3.6b).
+        A job id the platform no longer knows raises IstariError, which the
+        resume logic treats as unusable checkpoint evidence (FR11)."""
+        try:
+            job = self._client.get_job(job_id)
+        except Exception as e:
+            raise IstariError(f"cannot fetch job {job_id}: {e}") from e
+        status = job.status.name.value  # e.g. "Running"
+        if status in _RUNNING_STATUSES:
+            return JobState.RUNNING
+        if status == "Completed":
+            return JobState.COMPLETED
+        if status == "Failed":
+            return JobState.FAILED
+        if status == "Canceled":
+            return JobState.CANCELED
+        return JobState.UNKNOWN
+
+    # ---------------------------------------------------------- artifacts
+
+    def _iter_artifacts(self, model_id: str):
+        try:
+            model = self._client.get_model(model_id)
+        except Exception as e:
+            raise IstariError(f"cannot fetch model {model_id}: {e}") from e
+        return model.artifacts or []
+
+    def get_extracted_text(self, model_id: str) -> str:
+        """Read the extraction function's ``text.txt`` artifact via
+        ``artifact.read_text()``. Iterates ``reversed(model.artifacts)`` so a
+        re-extracted model yields the most recent text (artifacts cannot be
+        listed per job — known SDK gap)."""
+        for artifact in reversed(list(self._iter_artifacts(model_id))):
+            if _artifact_name(artifact) == _EXTRACT_TEXT_ARTIFACT:
+                try:
+                    return artifact.read_text()
+                except Exception as e:
+                    raise IstariError(f"cannot read {_EXTRACT_TEXT_ARTIFACT}: {e}") from e
+        raise IstariError(
+            f"model {model_id} has no {_EXTRACT_TEXT_ARTIFACT} artifact — "
+            "did the extraction job complete?"
+        )
+
+    def upload_json_artifact(
+        self,
+        model_id: str,
+        name: str,
+        payload: dict[str, Any],
+        *,
+        description: str | None = None,
+    ) -> ArtifactInfo:
+        """``client.add_artifact(model_id, path, ...)`` — the SDK is
+        path-based only, so the JSON is serialized to a temp file named
+        ``name`` first. ``name`` must carry the discoverability type tag
+        (\"rfi-requirements\"/\"rfi-answers\", PRD §3.6c)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / name
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            try:
+                artifact = self._client.add_artifact(
+                    model_id,
+                    path=str(path),
+                    display_name=name,
+                    description=description,
+                )
+            except Exception as e:
+                raise IstariError(f"cannot upload artifact {name}: {e}") from e
+        revisions = artifact.file.revisions or []
+        if not revisions:
+            raise IstariError(f"uploaded artifact {name} has no revisions")
+        return ArtifactInfo(
+            artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
+        )
+
+    def list_json_artifacts(
+        self, model_id: str, name: str
+    ) -> list[tuple[ArtifactInfo, dict[str, Any]]]:
+        """All artifacts on ``model_id`` whose name matches ``name``, newest
+        first, with parsed JSON content (``artifact.read_json()``). Used by
+        rebuild-from-platform (FR12) and idempotency checks (FR5)."""
+        results: list[tuple[ArtifactInfo, dict[str, Any]]] = []
+        for artifact in reversed(list(self._iter_artifacts(model_id))):
+            if _artifact_name(artifact) != name:
+                continue
+            revisions = artifact.file.revisions or []
+            if not revisions:
+                continue
+            try:
+                payload = artifact.read_json()
+            except Exception:
+                continue  # unreadable/non-JSON artifact: skip, not fatal
+            results.append(
+                (
+                    ArtifactInfo(
+                        artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
+                    ),
+                    payload,
+                )
+            )
+        return results
+
+    # -------------------------------------------------------------- links
+
+    def _resolve_link_type_id(self) -> str:
+        """``v3.list_revision_relationship_types()`` -> id of the
+        \"produces\" relationship type (cached). Raises IstariError if the
+        platform defines no such type."""
+        if self._link_type_id is not None:
+            return self._link_type_id
+        try:
+            page = self._v3.list_revision_relationship_types()
+        except Exception as e:
+            raise IstariError(f"cannot list relationship types: {e}") from e
+        for t in page.items or []:
+            if t.name == _LINK_TYPE_NAME:
+                self._link_type_id = t.id
+                return t.id
+        available = [t.name for t in page.items or []]
+        raise IstariError(
+            f"platform defines no '{_LINK_TYPE_NAME}' relationship type "
+            f"(available: {available})"
+        )
+
+    def create_link(self, source_revision_id: str, produced_revision_id: str) -> LinkInfo:
+        """``v3.create_revision_relationship(NewRevisionRelationshipDto)``:
+        left = the source revision (RFI/response file revision), right = the
+        produced revision (our uploaded artifact revision)."""
+        from istari_digital_client.v3.models.new_revision_relationship_dto import (
+            NewRevisionRelationshipDto,
+        )
+
+        dto = NewRevisionRelationshipDto(
+            relationship_type_id=self._resolve_link_type_id(),
+            left_revision_id=source_revision_id,
+            right_revision_id=produced_revision_id,
+        )
+        try:
+            rel = self._v3.create_revision_relationship(dto)
+        except Exception as e:
+            raise IstariError(f"cannot create link: {e}") from e
+        return LinkInfo(
+            link_id=rel.id,
+            type_name=rel.relationship_type_name,
+            left_revision_id=rel.left_revision.id,
+            right_revision_id=rel.right_revision.id,
+        )
+
+    def list_links(self, revision_id: str) -> list[LinkInfo]:
+        """``v3.list_revision_relationships(revision_id)`` -> all edges
+        touching ``revision_id`` (cursor-paginated, size<=100). Used for
+        rebuild-from-platform traversal (PRD §3.6c)."""
+        links: list[LinkInfo] = []
+        cursor = None
+        while True:
+            try:
+                page = self._v3.list_revision_relationships(
+                    revision_id, cursor=cursor, size=100
+                )
+            except Exception as e:
+                raise IstariError(f"cannot list links for {revision_id}: {e}") from e
+            for rel in page.items or []:
+                links.append(
+                    LinkInfo(
+                        link_id=rel.id,
+                        type_name=rel.relationship_type_name,
+                        left_revision_id=rel.left_revision.id,
+                        right_revision_id=rel.right_revision.id,
+                    )
+                )
+            cursor = getattr(page, "next_cursor", None)
+            if not cursor:
+                return links
+
+
+def _artifact_name(artifact: Any) -> str | None:
+    """Artifact display name, defensively (reference repos disagree on the
+    access path: ``artifact.name`` vs ``artifact.file.revisions[0].name``)."""
+    name = getattr(artifact, "name", None)
+    if name:
+        return name
+    file = getattr(artifact, "file", None)
+    if file is not None and file.revisions:
+        return file.revisions[0].name
+    return None
