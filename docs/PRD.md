@@ -1,0 +1,201 @@
+# PRD: RFI Manager (PySide6 desktop app on the Istari Platform)
+
+## 1. Problem
+A customer issues an RFI and receives hundreds of 20+ page PDF responses. Comparing
+them by hand is infeasible. RFI Manager automates the pipeline end to end on the
+Istari Platform: extract the RFI into requirements, extract each response into
+requirement answers, and present everything in a searchable, sortable, filterable
+table — with every value traceable to a versioned file on Istari.
+
+## 2. Product summary
+A desktop application (Python 3.11+, PySide6) named "RFI Manager" that uses the
+Istari Python SDK (`istari-digital-client` — verify current package name against
+docs.istaridigital.com) and a configurable LLM endpoint. Three-stage flow:
+
+Stage 1 — Link RFI: user enters the Istari UUID of an RFI file (and optionally a
+specific revision). App runs Istari's PDF data-extraction function on it, retrieves
+the extracted text artifact, sends text + Prompt A to the LLM, and receives a
+structured requirements list. User reviews/edits the requirements in a review
+screen, then commits: the requirements JSON is uploaded to Istari and linked to
+the source RFI file/revision. This JSON is the schema of record.
+
+Stage 2 — Ingest responses: user enters one or more UUIDs of RFI response PDFs
+already on Istari (single entry field + multi-line batch entry). For each: run the
+extraction function, retrieve text, send text + Prompt B (generated from the
+committed requirements) to the LLM, validate the returned answers, upload the
+answers JSON to Istari linked to the response file/revision.
+
+Stage 3 — Compare: all ingested responses render as rows in a table (columns =
+requirements). Global search, per-column sort, filter by completeness/flags.
+Every row shows its provenance (response file UUID + revision, answers artifact
+UUID, schema version). Export CSV/XLSX and "Publish report" (self-contained
+static HTML uploaded to Istari).
+
+## 3. Architecture requirements
+1. Layered: `istari_adapter.py` (all SDK calls behind a small interface),
+   `llm_adapter.py` (all LLM calls behind an interface, provider set by config),
+   `pipeline.py` (extract/prompt/validate/upload orchestration, no Qt imports),
+   `models.py` (dataclasses for Requirement, Answer, ResponseRecord),
+   `ui/` (PySide6 only, no SDK or HTTP calls directly from UI code).
+2. All SDK/LLM/network work runs on QThreadPool workers (QRunnable) communicating
+   via signals. The UI thread never blocks. Every long operation reports progress
+   states: queued -> extracting -> llm -> validating -> uploading -> done|failed(reason).
+3. Config from `config.toml` + env-var overrides: istari base URL, istari token
+   (env only, never written to disk by the app), LLM provider/model/endpoint/key
+   (key env only), request timeouts, retry counts.
+4. LLM adapter interface: `complete(system: str, user: str) -> str`. Ship two
+   implementations: `anthropic` (messages API) and `openai_compatible` (generic
+   chat-completions URL, covers most gov/enclave endpoints). Selection via config.
+5. SDK usage notes for the implementer: Istari has no public REST API — use the
+   official Python client. Consult docs.istaridigital.com for current client usage
+   (register/add model, get file/revision, run function/job, poll job status, list
+   and download artifacts, upload artifact/file, create links between files). If a
+   needed operation is unclear, introspect the installed client package and write
+   the adapter against what exists; keep ALL such calls inside istari_adapter.py.
+6. Persistence & crash recovery — three tiers, platform is source of truth:
+   a. Project file (index/cache only): one JSON file per RFI (`<name>.rfiproj`)
+      holding: RFI UUID + revision, committed requirements artifact UUID +
+      schema_version, and per response: UUID, revision, pipeline state,
+      Istari job id (when submitted), answers artifact UUID (when uploaded).
+      Written at EVERY state transition (never only on exit), atomically
+      (write temp file, fsync, rename). Format has a version field.
+      Table content is NOT stored here — it is re-fetched from Istari on load.
+   b. In-flight checkpoints: each response's pipeline is an explicit state
+      machine (queued -> job_submitted -> text_retrieved -> llm_returned ->
+      validated -> uploaded -> done | failed(reason)). Persist evidence with
+      each transition: job id on submit (restart polls the same job instead of
+      resubmitting); raw LLM output cached to a local scratch file on return
+      (LLM calls are the expensive step — never re-pay for a crash between
+      LLM return and upload). On startup, offer to resume any response in an
+      intermediate state from its furthest checkpoint.
+   c. Rebuild from platform: given only an RFI UUID, the app must be able to
+      reconstruct the project by traversing Istari links: locate the latest
+      requirements artifact (schema + version), then locate answers artifacts
+      via links/metadata. To make this possible, all uploaded artifacts MUST
+      be discoverable: include a type tag in the artifact name
+      ("rfi-requirements", "rfi-answers") and full self-describing metadata
+      per section 4. This is also the multi-user story: two machines pointed
+      at the same RFI converge on the same table.
+
+## 4. Data contracts
+Requirement (Stage 1 output, list of):
+  { "id": "3.2.1" | "C-01",       # reuse RFI's own numbering when present
+    "label": "Unit weight (kg)",   # <= 4 words, column heading
+    "description": "<the requirement as stated in the RFI, condensed>",
+    "type": "boolean" | "numeric" | "enum" | "text",
+    "unit": "kg" | null,           # numeric only
+    "options": ["Compliant", ...] | null,   # enum only
+    "required": true | false }
+Requirements artifact uploaded to Istari wraps the list with metadata:
+  { "rfi_uuid": ..., "rfi_revision": ..., "schema_version": "1.0",
+    "generated_at": iso8601, "llm_model": ..., "requirements": [ ... ] }
+
+Answer (Stage 2 output, list of):
+  { "id": "<requirement id>",
+    "value": <bool|number|string|"NOT_FOUND">,
+    "unit": "kg" | null,
+    "quote": "<verbatim supporting sentence>",   # may be "" when NOT_FOUND
+    "page": <int|null>,
+    "confidence": "high" | "medium" | "low" | "none" }
+Answers artifact wraps with provenance:
+  { "response_uuid": ..., "response_revision": ..., "vendor": "<from doc or user>",
+    "schema_version": "<matches requirements artifact>", "extracted_at": iso8601,
+    "llm_model": ..., "answers": [ ... ] }
+
+Validation rules (pipeline, applied to all LLM output): strip markdown fences;
+JSON must parse; every requirement id present exactly once; no unknown ids
+(unknown -> warning, dropped); numeric values parse as numbers; enum values in
+options; booleans are true/false; NOT_FOUND allowed anywhere with confidence
+"none". On validation failure: retry the LLM call ONCE with the error list
+appended to the prompt; if still invalid, mark the item failed with reasons
+shown in the UI. Never upload an artifact that failed validation.
+
+## 5. Functional requirements
+FR1  Stage 1 UI: UUID (+ optional revision) input; "Extract requirements" button;
+     progress states visible; on LLM return, open review screen.
+FR2  Review screen: editable table of requirements (id, label, description, type,
+     unit, options, required); add/delete/reorder rows; inline validation
+     (duplicate ids, enum without options, numeric without unit warning);
+     "Commit to Istari" uploads the requirements artifact, links it to the RFI
+     file, records schema_version (user-settable, default 1.0).
+FR3  Re-running Stage 1 with a committed schema warns and, on confirm, commits a
+     new artifact with bumped schema_version. Existing response rows keep their
+     original schema_version stamp and are flagged stale in the table.
+FR4  Stage 2 UI: single-UUID field plus batch box (one UUID per line);
+     per-response status list; failures show reason and a retry action.
+FR5  Idempotency: before processing a response, check the project file (and,
+     if cheaply possible via the SDK, existing linked artifacts) for an
+     answers artifact matching (response revision, schema_version); if found,
+     load instead of re-running. A "Force re-extract" action bypasses this.
+FR6  Comparison table: QTableView + QSortFilterProxyModel. Columns: Vendor,
+     one per requirement, then provenance columns (response UUID short form,
+     schema rev). Numeric-aware sorting; global search box; filters: all /
+     has NOT_FOUND / has low-confidence / stale schema. Cell states: NOT_FOUND
+     rendered as flagged em-dash; low/medium confidence tinted.
+FR7  Row detail pane: selecting a row shows per-requirement value, quote, page,
+     confidence, and full provenance UUIDs (copyable).
+FR8  Export: CSV and XLSX of current (filtered) view. "Publish report": render a
+     self-contained static HTML table (no scripts required to read) and upload it
+     to Istari linked to the RFI.
+FR9  Prompts: Prompt A (requirements extraction) and Prompt B (answers extraction,
+     generated from the committed requirements so they cannot drift) live in
+     `prompts.py` as templates with a visible version string included in artifact
+     metadata.
+FR10 All errors are surfaced in the UI with actionable text; no silent failures;
+     a session log panel records every SDK call, job id, artifact UUID (this is
+     the operator's audit view).
+FR11 Startup resume: on opening a project file, reload committed state from
+     Istari and detect responses in intermediate pipeline states; prompt
+     "Resume N incomplete extractions?"; resume each from its furthest
+     checkpoint per section 3.6b (poll existing job ids; reuse cached LLM
+     output; never resubmit completed work). A response whose checkpoint
+     evidence is unusable (e.g. job id no longer found) restarts cleanly from
+     queued with a note in the session log.
+FR12 Rebuild from platform: "Open from RFI UUID" flow that reconstructs a
+     project with no local file, per section 3.6c. Conflicts (multiple
+     requirements artifacts) resolve to the highest schema_version with the
+     user shown what was chosen.
+
+## 6. Non-goals (v1)
+No editing answer values in the table (re-extract instead); no scoring/weighting;
+no multi-RFI concurrent projects in one window (one project file at a time);
+no packaging/installer work (run from source; packaging is v2); no direct PDF
+viewing (show UUIDs/links to open in Istari instead).
+
+## 7. Testing
+pytest, no network in tests. `istari_adapter` and `llm_adapter` get fake
+implementations for tests.
+  T1 validation: table-driven tests covering every rule in section 4, including
+     fence stripping, retry-once path, unknown ids, type coercion failures.
+  T2 pipeline: end-to-end with fakes — Stage 1 produces a requirements artifact
+     upload call with correct linkage args; Stage 2 produces answers artifact
+     with correct provenance; idempotency skip path; force re-extract path.
+  T3 prompt generation: Prompt B contains every committed requirement id and
+     its constraints; changing schema changes prompt version stamp.
+  T4 models/serialization round-trip; project file save/load.
+  T5 report renderer: published HTML contains all visible rows, no <script src>,
+     no external URLs, escapes user data.
+  T6 persistence: project file round-trip; atomic write survives simulated
+     crash mid-write (temp file present, original intact); state-machine resume
+     from every intermediate state using fakes (job re-polled not resubmitted;
+     cached LLM output reused; upload not duplicated); rebuild-from-UUID with
+     fakes reconstructs an equivalent project.
+UI smoke: a `--selftest` launch flag that loads fakes, runs Stage 1 + two
+responses, and exits nonzero on failure (usable in CI without a display via
+QT_QPA_PLATFORM=offscreen).
+
+## 8. Milestones
+M1 Skeleton: layers, config, adapters (real istari_adapter written against the
+   SDK docs; fakes for tests), models, validation, project-file persistence
+   with atomic writes and the pipeline state machine; pytest green on T1/T4/T6
+   (persistence parts).
+M2 Stage 1 end-to-end incl. review screen and commit; T2 (stage 1), T3.
+M3 Stage 2 batch ingest + comparison table (FR4-FR7) + startup resume (FR11)
+   and rebuild-from-UUID (FR12); T2 and T6 complete.
+M4 Export + publish report (FR8), session log (FR10), selftest; T5; polish.
+
+## 9. Code quality
+Type hints throughout; dataclasses for contracts; no business logic in Qt slots
+beyond dispatch; docstrings on every adapter method describing the SDK call it
+wraps and why; README with setup (venv, pip install, config.toml example,
+env vars) and a "running against a real Istari instance" section.

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<title>RFI Response Table</title>
+<!--
+  Persistence model: the schema and rows live in the two JSON script blocks
+  below. The page never edits this file on disk (browsers forbid that);
+  instead, every change downloads a fresh copy of this file with the change
+  embedded. Replace the old file with the download (or upload it to Istari
+  as a new version of the same file). Reopening the saved copy restores
+  everything.
+-->
+
+<script type="application/json" id="schema-data">[{"id":"C-01","label":"MOSA compliance"},{"id":"C-02","label":"Unit weight (kg)"},{"id":"C-03","label":"TRL"},{"id":"C-04","label":"ITAR restrictions"},{"id":"C-05","label":"Lead time (months)"}]</script>
+<script type="application/json" id="row-data">[
+ {
+  "vendor": "Acme Aerospace",
+  "C-01": "Compliant",
+  "C-02": 38.5,
+  "C-03": 7,
+  "C-04": "Category XI(a)",
+  "C-05": 14
+ }
+]</script>
+
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1c2430; }
+  h1 { font-size: 1.2rem; margin-bottom: 1rem; }
+  section { margin-bottom: 1.5rem; }
+  label { display: block; font-weight: 600; margin-bottom: 0.3rem; }
+  textarea { width: 100%; max-width: 700px; min-height: 110px; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; }
+  button { padding: 0.45rem 1rem; font-size: 0.9rem; cursor: pointer; }
+  .msg { font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; margin-top: 0.4rem; }
+  .msg.err { color: #a0362b; }
+  .msg.ok { color: #2e6b47; }
+  table { border-collapse: collapse; margin-top: 0.5rem; }
+  th, td { border: 1px solid #999; padding: 0.4rem 0.7rem; font-size: 0.85rem; text-align: left; }
+  th { background: #1c2430; color: #fff; }
+  td.missing { color: #a0362b; }
+  .hint { font-size: 0.8rem; color: #46586a; margin-top: 0.3rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<h1>RFI Response Table</h1>
+
+<!-- Step 1: schema -->
+<section id="schema-section" hidden="">
+  <label for="schema-input">Table schema (JSON array of fields)</label>
+  <textarea id="schema-input" placeholder="[{&quot;id&quot;: &quot;C-01&quot;, &quot;label&quot;: &quot;MOSA compliance&quot;}, {&quot;id&quot;: &quot;C-02&quot;, &quot;label&quot;: &quot;Unit weight (kg)&quot;}]"></textarea>
+  <div><button id="schema-btn">Create table</button></div>
+  <div class="msg" id="schema-msg"></div>
+</section>
+
+<!-- Step 2: table + row entry (hidden until schema exists) -->
+<section id="table-section">
+  <table id="table">
+    <thead><tr id="head-row"></tr></thead>
+    <tbody id="body-rows"></tbody>
+  </table>
+</section>
+
+<section id="row-section">
+  <label for="row-input">Add RFI response row (JSON object keyed by field id)</label>
+  <textarea id="row-input" placeholder="{&quot;vendor&quot;: &quot;Acme Aerospace&quot;, &quot;C-01&quot;: &quot;Compliant&quot;, &quot;C-02&quot;: 38.5}"></textarea>
+  <div><button id="row-btn">Add row</button></div>
+  <div class="msg" id="row-msg"></div>
+  <div class="hint">Each change downloads an updated copy of this file with the data embedded.
+  Replace the old file with it (or upload to Istari as a new version). Reopening the saved copy restores the table.</div>
+</section>
+
+<script>
+(function () {
+  "use strict";
+  var SCHEMA = JSON.parse(document.getElementById("schema-data").textContent); // null or [{id, label}]
+  var ROWS = JSON.parse(document.getElementById("row-data").textContent);      // array of row objects
+
+  function show(el, cls, text) { el.className = "msg " + cls; el.textContent = text; }
+  function parseJSON(raw) {
+    raw = raw.trim().replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+    return JSON.parse(raw);
+  }
+
+  /* ---- Rendering (idempotent: rebuilds from SCHEMA/ROWS) ---- */
+  function renderTable() {
+    var head = document.getElementById("head-row");
+    head.innerHTML = "";
+    var thV = document.createElement("th"); thV.textContent = "Vendor"; head.appendChild(thV);
+    SCHEMA.forEach(function (f) {
+      var th = document.createElement("th"); th.textContent = f.label; head.appendChild(th);
+    });
+    var body = document.getElementById("body-rows");
+    body.innerHTML = "";
+    ROWS.forEach(function (row) {
+      var tr = document.createElement("tr");
+      var tdV = document.createElement("td"); tdV.textContent = row.vendor || ""; tr.appendChild(tdV);
+      SCHEMA.forEach(function (f) {
+        var td = document.createElement("td");
+        var v = row[f.id];
+        if (f.id in row && v !== null && v !== "" && v !== "NOT_FOUND") td.textContent = String(v);
+        else { td.textContent = "—"; td.className = "missing"; }
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    document.getElementById("table-section").hidden = false;
+    document.getElementById("row-section").hidden = false;
+    document.getElementById("schema-section").hidden = true;
+  }
+
+  /* ---- Persistence: download a copy of this file with data embedded ---- */
+  function downloadSelf() {
+    var clone = document.documentElement.cloneNode(true);
+    // "<\/" escaping keeps values containing a closing script tag from breaking the block
+    clone.querySelector("#schema-data").textContent = JSON.stringify(SCHEMA).replace(/<\//g, "<\\/");
+    clone.querySelector("#row-data").textContent = JSON.stringify(ROWS, null, 1).replace(/<\//g, "<\\/");
+    // Strip transient state so the saved copy boots clean and re-renders from data
+    ["head-row", "body-rows"].forEach(function (id) { clone.querySelector("#" + id).innerHTML = ""; });
+    clone.querySelectorAll(".msg").forEach(function (el) { el.className = "msg"; el.textContent = ""; });
+    clone.querySelectorAll("textarea").forEach(function (el) { el.textContent = ""; });
+    var html = "<!DOCTYPE html>\n" + clone.outerHTML;
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+    a.download = "rfi-table.html";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  }
+
+  /* ---- Step 1: schema ---- */
+  document.getElementById("schema-btn").addEventListener("click", function () {
+    var msg = document.getElementById("schema-msg");
+    var parsed;
+    try { parsed = parseJSON(document.getElementById("schema-input").value); }
+    catch (e) { show(msg, "err", "Not valid JSON: " + e.message); return; }
+
+    if (!Array.isArray(parsed) || parsed.length === 0) { show(msg, "err", "Schema must be a non-empty JSON array of fields."); return; }
+    var errs = [], seen = {};
+    var fields = parsed.map(function (f, i) {
+      if (typeof f === "string") f = { id: f, label: f };            // allow plain strings
+      if (!f || typeof f !== "object" || !f.id) { errs.push("Field " + (i + 1) + ": needs an \"id\"."); return null; }
+      if (seen[f.id]) errs.push("Field " + (i + 1) + ": duplicate id \"" + f.id + "\".");
+      seen[f.id] = true;
+      return { id: String(f.id), label: String(f.label || f.id) };
+    });
+    if (errs.length) { show(msg, "err", errs.join("\n")); return; }
+
+    SCHEMA = fields;
+    renderTable();
+    downloadSelf();
+  });
+
+  /* ---- Step 2: rows (repeatable) ---- */
+  document.getElementById("row-btn").addEventListener("click", function () {
+    var msg = document.getElementById("row-msg");
+    var parsed;
+    try { parsed = parseJSON(document.getElementById("row-input").value); }
+    catch (e) { show(msg, "err", "Not valid JSON: " + e.message); return; }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { show(msg, "err", "Row must be a JSON object keyed by field id."); return; }
+    var warns = [];
+    if (!parsed.vendor) warns.push("No \"vendor\" key — vendor cell will be blank.");
+    SCHEMA.forEach(function (f) { if (!(f.id in parsed)) warns.push("Missing field \"" + f.id + "\" — shown as —."); });
+    Object.keys(parsed).forEach(function (k) {
+      if (k !== "vendor" && !SCHEMA.some(function (f) { return f.id === k; })) warns.push("Unknown key \"" + k + "\" — ignored.");
+    });
+
+    ROWS.push(parsed);
+    renderTable();
+    downloadSelf();
+
+    document.getElementById("row-input").value = "";
+    show(msg, warns.length ? "err" : "ok",
+      (warns.length ? "Row added with warnings:\n" + warns.join("\n") : "Row added.") +
+      "\nUpdated file downloaded — replace the old copy with it.");
+  });
+
+  /* ---- Boot: restore embedded state ---- */
+  if (Array.isArray(SCHEMA) && SCHEMA.length > 0) renderTable();
+})();
+</script>
+
+
+</body></html>

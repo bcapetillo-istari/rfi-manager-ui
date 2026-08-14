@@ -1,0 +1,7 @@
+[
+  {"id": "C-01", "label": "MOSA compliance"},
+  {"id": "C-02", "label": "Unit weight (kg)"},
+  {"id": "C-03", "label": "TRL"},
+  {"id": "C-04", "label": "ITAR restrictions"},
+  {"id": "C-05", "label": "Lead time (months)"}
+]
