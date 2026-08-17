@@ -102,7 +102,7 @@ class CredentialSelection:
 _EXTRACT_FUNCTION = "@istari:extract"
 _EXTRACT_TOOL = "open_pdf"
 _EXTRACT_TOOL_VERSION = "1.0.0"
-_EXTRACT_OS = "Ubuntu 22.04"
+_EXTRACT_OS = "Windows 10"
 EXTRACT_TEXT_ARTIFACT = "text.txt"
 _EXTRACT_TEXT_ARTIFACT = EXTRACT_TEXT_ARTIFACT  # back-compat alias
 
