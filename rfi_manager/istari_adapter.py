@@ -519,11 +519,22 @@ class IstariAdapter:
             f"(available: {available})"
         )
 
-    def create_link(self, source_revision_id: str, produced_revision_id: str) -> LinkInfo:
+    def create_link(
+        self, source_revision_id: str, produced_revision_id: str
+    ) -> LinkInfo:
         """``v3.create_revision_relationship(NewRevisionRelationshipDto)``:
         left = the source revision (RFI/response file revision), right = the
-        produced revision (our uploaded artifact revision)."""
-        from istari_digital_client.v3.models.new_revision_relationship_dto import (
+        produced revision (our uploaded artifact revision).
+
+        The client's retry policy (``retries`` in config) resends timed-out
+        requests without regard to idempotency — verified live 2026-08-17: a
+        create-link call can succeed server-side while the client sees a
+        read timeout, retry, and get back an "Integrity Conflict" 500 for
+        the duplicate. Treat that specific conflict as success by looking up
+        the edge the first attempt already created, instead of failing a
+        commit whose data is actually fine on the platform."""
+        from istari_digital_client import ApiException
+        from istari_digital_client.legacy.v3.models.new_revision_relationship_dto import (
             NewRevisionRelationshipDto,
         )
 
@@ -534,13 +545,22 @@ class IstariAdapter:
         )
         try:
             rel = self._v3.create_revision_relationship(dto)
+        except ApiException as e:
+            if e.status == 500 and e.body and "Integrity Conflict" in e.body:
+                for link in self.list_links(source_revision_id):
+                    if (
+                        link.left_revision_id == source_revision_id
+                        and link.right_revision_id == produced_revision_id
+                    ):
+                        return link
+            raise IstariError(f"cannot create link: {e}") from e
         except Exception as e:
             raise IstariError(f"cannot create link: {e}") from e
         return LinkInfo(
             link_id=rel.id,
             type_name=rel.relationship_type_name,
-            left_revision_id=rel.left_revision.id,
-            right_revision_id=rel.right_revision.id,
+            left_revision_id=rel.left_revision.file_revision_id,
+            right_revision_id=rel.right_revision.file_revision_id,
         )
 
     def list_links(self, revision_id: str) -> list[LinkInfo]:
@@ -561,8 +581,8 @@ class IstariAdapter:
                     LinkInfo(
                         link_id=rel.id,
                         type_name=rel.relationship_type_name,
-                        left_revision_id=rel.left_revision.id,
-                        right_revision_id=rel.right_revision.id,
+                        left_revision_id=rel.left_revision.file_revision_id,
+                        right_revision_id=rel.right_revision.file_revision_id,
                     )
                 )
             cursor = getattr(page, "next_cursor", None)
