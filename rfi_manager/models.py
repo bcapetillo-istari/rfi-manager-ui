@@ -225,16 +225,21 @@ class ResponseRecord:
     """Per-response entry in the project file (PRD §3.6a) — pointers only.
 
     Table content is never stored here; it is re-fetched from Istari.
-    ``llm_job_id`` is the post-LLM checkpoint evidence: a restart re-polls the
-    job and reads its raw-output artifact from the platform (PRD §3.6b —
-    never re-pay for a crash between LLM return and upload). ``llm_attempts``
-    persists the §4 retry-once counter so a crash cannot cause extra retries.
+    ``llm_input_model_id`` is the standalone Model the extracted text was
+    staged as (LLM jobs can only stage a genuine Model's own revision as
+    input — verified live 2026-08-14) — needed on resume to re-poll the job
+    and read its output from the right resource. ``llm_job_id`` is the
+    post-LLM checkpoint evidence: a restart re-polls the job and reads its
+    raw-output artifact from the platform (PRD §3.6b — never re-pay for a
+    crash between LLM return and upload). ``llm_attempts`` persists the §4
+    retry-once counter so a crash cannot cause extra retries.
     """
 
     uuid: str
     revision: str | None = None
     state: PipelineState = PipelineState.QUEUED
     job_id: str | None = None
+    llm_input_model_id: str | None = None
     llm_job_id: str | None = None
     llm_attempts: int = 0
     answers_artifact_uuid: str | None = None
@@ -250,6 +255,7 @@ class ResponseRecord:
         self.error = error if new is PipelineState.FAILED else None
         if new is PipelineState.QUEUED:  # retry from failed: drop stale evidence
             self.job_id = None
+            self.llm_input_model_id = None
             self.llm_job_id = None
             self.llm_attempts = 0
             self.answers_artifact_uuid = None
@@ -260,6 +266,7 @@ class ResponseRecord:
             "revision": self.revision,
             "state": self.state.value,
             "job_id": self.job_id,
+            "llm_input_model_id": self.llm_input_model_id,
             "llm_job_id": self.llm_job_id,
             "llm_attempts": self.llm_attempts,
             "answers_artifact_uuid": self.answers_artifact_uuid,
@@ -275,6 +282,7 @@ class ResponseRecord:
             revision=d.get("revision"),
             state=PipelineState(d.get("state", "queued")),
             job_id=d.get("job_id"),
+            llm_input_model_id=d.get("llm_input_model_id"),
             llm_job_id=d.get("llm_job_id"),
             llm_attempts=int(d.get("llm_attempts", 0)),
             answers_artifact_uuid=d.get("answers_artifact_uuid"),

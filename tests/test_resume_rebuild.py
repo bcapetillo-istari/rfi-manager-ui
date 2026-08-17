@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from rfi_manager.istari_adapter import LLM_OUTPUT_ARTIFACT
+from rfi_manager.istari_adapter import LLM_RESPONSE_OUTPUT_ARTIFACT
 from rfi_manager.models import (
     PipelineState,
     Project,
@@ -82,9 +82,11 @@ def test_resume_from_llm_job_submitted_repolls_same_llm_job(tmp_path: Path):
     record = start_record(istari, project, response)
 
     istari.queue_llm_output(ANSWERS_JSON)
+    text_model = istari.register_text_model("TEXT", display_name="x")
     record.job_id = "job-x"
+    record.llm_input_model_id = text_model.model_id
     record.llm_job_id = istari.submit_llm_job(
-        response.model_id, "@istari_utils:extract_response_requirements", {},
+        text_model.model_id, "@istari_utils:extract_response_requirements", {},
         llm_config(istari).credentials,
     )
     record.llm_attempts = 1
@@ -125,8 +127,10 @@ def test_resume_from_llm_returned_reuses_platform_artifact(tmp_path: Path):
     istari, project, req_artifact, response, path = make_setup(tmp_path)
     record = start_record(istari, project, response)
 
-    istari._add_artifact(response.model_id, LLM_OUTPUT_ARTIFACT, ANSWERS_JSON)
+    text_model = istari.register_text_model("TEXT", display_name="x")
+    istari._add_artifact(text_model.model_id, LLM_RESPONSE_OUTPUT_ARTIFACT, ANSWERS_JSON)
     record.job_id = "job-x"
+    record.llm_input_model_id = text_model.model_id
     record.llm_job_id = "llmjob-x"
     record.llm_attempts = 1
     for state in (PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
@@ -143,13 +147,15 @@ def test_resume_from_llm_returned_reuses_platform_artifact(tmp_path: Path):
 def test_resume_from_llm_returned_with_missing_artifact_restarts(tmp_path: Path):
     istari, project, req_artifact, response, path = make_setup(tmp_path)
     record = start_record(istari, project, response)
+    text_model = istari.register_text_model("TEXT", display_name="x")
     record.job_id = "job-x"
+    record.llm_input_model_id = text_model.model_id
     record.llm_job_id = "llmjob-x"
     record.llm_attempts = 1
     for state in (PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
                   PipelineState.LLM_JOB_SUBMITTED, PipelineState.LLM_RETURNED):
         record.transition(state)
-    # no llm_output.json artifact exists -> unusable checkpoint evidence
+    # no stdout artifact exists on the text model -> unusable checkpoint evidence
 
     notes: list[str] = []
     istari.queue_llm_output(ANSWERS_JSON)
@@ -167,8 +173,10 @@ def test_crash_after_first_retry_never_retries_again(tmp_path: Path):
     istari, project, req_artifact, response, path = make_setup(tmp_path)
     record = start_record(istari, project, response)
 
-    istari._add_artifact(response.model_id, LLM_OUTPUT_ARTIFACT, "still invalid")
+    text_model = istari.register_text_model("TEXT", display_name="x")
+    istari._add_artifact(text_model.model_id, LLM_RESPONSE_OUTPUT_ARTIFACT, "still invalid")
     record.job_id = "job-x"
+    record.llm_input_model_id = text_model.model_id
     record.llm_job_id = "llmjob-retry"
     record.llm_attempts = 2  # the one retry already happened before the crash
     for state in (PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
@@ -184,8 +192,10 @@ def test_crash_after_first_retry_never_retries_again(tmp_path: Path):
 def test_resume_from_validated_uploads_once(tmp_path: Path):
     istari, project, req_artifact, response, path = make_setup(tmp_path)
     record = start_record(istari, project, response)
-    istari._add_artifact(response.model_id, LLM_OUTPUT_ARTIFACT, ANSWERS_JSON)
+    text_model = istari.register_text_model("TEXT", display_name="x")
+    istari._add_artifact(text_model.model_id, LLM_RESPONSE_OUTPUT_ARTIFACT, ANSWERS_JSON)
     record.job_id = "job-x"
+    record.llm_input_model_id = text_model.model_id
     record.llm_job_id = "llmjob-x"
     record.llm_attempts = 1
     for state in (PipelineState.JOB_SUBMITTED, PipelineState.TEXT_RETRIEVED,
@@ -275,7 +285,7 @@ def test_crash_between_upload_and_persist_adopts_instead_of_reupload(tmp_path: P
     record = start_record(istari, project, response)
 
     # platform state: raw output + answers artifact both exist...
-    istari._add_artifact(response.model_id, LLM_OUTPUT_ARTIFACT, ANSWERS_JSON)
+    istari._add_artifact(response.model_id, LLM_RESPONSE_OUTPUT_ARTIFACT, ANSWERS_JSON)
     istari.upload_json_artifact(
         response.model_id, ANSWERS_ARTIFACT_NAME,
         {"response_uuid": response.model_id,

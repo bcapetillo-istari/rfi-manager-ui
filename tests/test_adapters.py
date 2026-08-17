@@ -10,7 +10,7 @@ import pytest
 
 from rfi_manager.istari_adapter import (
     LLM_FUNCTION_EXTRACT_RFI,
-    LLM_OUTPUT_ARTIFACT,
+    LLM_RFI_OUTPUT_ARTIFACT,
     IstariAdapter,
     IstariError,
     JobState,
@@ -21,6 +21,7 @@ ADAPTER_METHODS = [
     "check_connection",
     "get_model_info",
     "model_id_for_revision",
+    "register_text_model",
     "submit_extraction_job",
     "submit_llm_job",
     "list_credentials",
@@ -60,7 +61,7 @@ def test_fake_llm_job_flow():
         model.model_id, LLM_FUNCTION_EXTRACT_RFI, {"provider": "claude"}, creds
     )
     assert fake.get_job_state(job_id) is JobState.COMPLETED
-    assert fake.read_text_artifact(model.model_id, LLM_OUTPUT_ARTIFACT) == '[{"id": "C-01"}]'
+    assert fake.read_text_artifact(model.model_id, LLM_RFI_OUTPUT_ARTIFACT) == '[{"id": "C-01"}]'
     [call] = fake.llm_calls
     assert call["function"] == LLM_FUNCTION_EXTRACT_RFI
     assert call["credentials"] is creds

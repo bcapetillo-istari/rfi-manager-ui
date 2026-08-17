@@ -16,7 +16,8 @@ from typing import Any, Callable, Protocol
 from .istari_adapter import (
     LLM_FUNCTION_EXTRACT_RESPONSE,
     LLM_FUNCTION_EXTRACT_RFI,
-    LLM_OUTPUT_ARTIFACT,
+    LLM_RESPONSE_OUTPUT_ARTIFACT,
+    LLM_RFI_OUTPUT_ARTIFACT,
     ArtifactInfo,
     CredentialSelection,
     IstariError,
@@ -292,6 +293,9 @@ class IstariClient(Protocol):
 
     def get_model_info(self, model_id: str) -> ModelInfo: ...
     def model_id_for_revision(self, revision_id: str) -> str: ...
+    def register_text_model(
+        self, text: str, *, display_name: str, source_revision_id: str | None = None,
+    ) -> ModelInfo: ...
     def submit_extraction_job(self, model_id: str) -> str: ...
     def submit_llm_job(
         self, model_id: str, function: str, parameters: dict[str, Any],
@@ -332,22 +336,18 @@ class LLMJobConfig:
 
 def _llm_parameters(
     config: LLMJobConfig,
-    text_artifact: ArtifactInfo,
     *,
-    origin_resource_id: str,
     extra: dict[str, Any] | None = None,
     validation_errors: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Job parameters per the @istari_utils:rfi_manager contract: revision
-    references to the extracted text (never the text itself), the RFI/response
-    resource the text was extracted from (in case the function wants it —
-    e.g. to know where to write output), provider/model defaults, and — on
-    the §4 retry-once path — the validation error list."""
-    params: dict[str, Any] = {
-        "source_resource_id": text_artifact.artifact_id,
-        "source_revision_id": text_artifact.revision_id,
-        "origin_resource_id": origin_resource_id,
-    }
+    """Job parameters per the @istari_utils:rfi_manager function_schema
+    (verified live 2026-08-14 via get_function_schema): provider/model
+    defaults, the §4 retry-once validation error list, and caller-supplied
+    stage-specific identifying parameters (rfi_uuid/rfi_rev or
+    response_uuid/response_rev/requirements_json) via ``extra``. There is no
+    parameter for the extracted text itself — it travels as the job's staged
+    input_model (see _stage_text_model)."""
+    params: dict[str, Any] = {}
     if config.provider:
         params["provider"] = config.provider
     if config.model:
@@ -371,12 +371,49 @@ def _find_text_artifact(istari: IstariClient, model_id: str) -> ArtifactInfo:
     return info
 
 
+def _stage_text_model(
+    istari: IstariClient, model_id: str, *, display_name: str,
+    log: "LogCallback | None" = None,
+) -> ModelInfo:
+    """Register the extracted text as its own standalone Model so an LLM job
+    can stage it as ``input_model`` (attaching a job to the RFI/response
+    model directly stages that model's own latest revision — its source
+    PDF — never an artifact hanging off it; verified live 2026-08-14).
+
+    A prior attempt attaching a job directly to the text.txt ARTIFACT
+    produced "Could not load file" in Job Details. A follow-up attempt using
+    this standalone-Model approach produced the same symptom with the new
+    model showing a 0-byte revision — so the failure is not "artifact vs
+    model": either the text we read here was already empty, or the upload
+    pipeline drops content even for a genuine model. ``len(text)`` is logged
+    so the next live run tells us which."""
+    from .istari_adapter import EXTRACT_TEXT_ARTIFACT
+
+    text_artifact = _find_text_artifact(istari, model_id)
+    text = istari.get_extracted_text(model_id)
+    _log(
+        log,
+        f"read {EXTRACT_TEXT_ARTIFACT} artifact {text_artifact.artifact_id}: "
+        f"{len(text)} chars"
+        + (f" (preview: {text[:120]!r})" if text else " — EMPTY"),
+    )
+    text_model = istari.register_text_model(
+        text, display_name=display_name, source_revision_id=text_artifact.revision_id,
+    )
+    _log(
+        log,
+        f"staged extracted text as model {text_model.model_id} "
+        f"(from {EXTRACT_TEXT_ARTIFACT} artifact {text_artifact.artifact_id}, "
+        f"{len(text)} chars written)",
+    )
+    return text_model
+
+
 def _log_llm_submission(
     log: "LogCallback | None",
     *,
     function: str,
     attached_resource: str,
-    origin_resource: str,
     parameters: dict[str, Any],
     credentials: CredentialSelection,
 ) -> None:
@@ -384,50 +421,47 @@ def _log_llm_submission(
     diagnosing manifest/contract mismatches against the deployed module)."""
     _log(
         log,
-        f"LLM job submit: function={function} "
-        f"attached_to(text.txt artifact resource)={attached_resource} "
-        f"origin_resource={origin_resource} "
+        f"LLM job submit: function={function} attached_to={attached_resource} "
         f"credentials(llm={credentials.llm_credential_id}, "
         f"istari={credentials.istari_credential_id}) "
         f"parameters={parameters}",
     )
 
 
-def _llm_output_candidates(istari: IstariClient, origin_resource_id: str) -> list[str]:
-    """Resources to try for the LLM job's raw-output artifact: the
-    extracted-text artifact the job was attached to (preferred — that's where
-    the deployed function almost certainly writes back to), then the origin
-    RFI/response resource. The text artifact may be unavailable if it was
-    since removed; that's not fatal here — fall back to the origin alone."""
-    try:
-        text_artifact = _find_text_artifact(istari, origin_resource_id)
-    except PipelineError:
-        return [origin_resource_id]
-    return [text_artifact.artifact_id, origin_resource_id]
-
-
 def _read_llm_output(
     istari: IstariClient,
-    candidates: list[str],
+    model_id: str,
     *,
+    output_artifact: str,
     log: "LogCallback | None" = None,
 ) -> str:
-    """Read the LLM job's raw-output artifact. Tries ``candidates`` in order
-    (the text.txt artifact resource the job was attached to, then the
-    RFI/response resource) since it is not yet confirmed which one the
-    deployed function uploads its output to."""
-    last_error: Exception | None = None
-    for candidate in candidates:
-        try:
-            raw = istari.read_text_artifact(candidate, LLM_OUTPUT_ARTIFACT)
-        except IstariError as e:
-            last_error = e
-            continue
-        _log(log, f"LLM output artifact found on resource {candidate}")
-        return raw
-    raise IstariError(
-        f"no {LLM_OUTPUT_ARTIFACT} artifact found on any of {candidates}: {last_error}"
-    )
+    """Read the LLM job's real result artifact — cl_module flattens every
+    file the script writes into individual same-named artifacts (verified
+    live 2026-08-17); the script's actual output is named by its own
+    --output default (requirements_raw.json / answers_raw.json), not
+    "stdout" — from the text-model resource the job ran against."""
+    try:
+        raw = istari.read_text_artifact(model_id, output_artifact)
+    except IstariError as e:
+        raise IstariError(
+            f"no {output_artifact} artifact on resource {model_id}: {e}"
+        ) from e
+    _log(log, f"LLM {output_artifact} artifact found on resource {model_id}")
+    return raw
+
+
+def _read_llm_stderr(
+    istari: IstariClient, model_id: str, *, log: "LogCallback | None" = None
+) -> str | None:
+    """Best-effort read of the job's stderr artifact for diagnostics when
+    validation fails or no output is found — surfaces the function's actual
+    traceback/error instead of leaving the user guessing."""
+    from .istari_adapter import LLM_STDERR_ARTIFACT
+
+    try:
+        return istari.read_text_artifact(model_id, LLM_STDERR_ARTIFACT)
+    except IstariError:
+        return None
 
 
 def run_llm_job_validated(
@@ -437,39 +471,38 @@ def run_llm_job_validated(
     llm_config: LLMJobConfig,
     validator: Callable[[str], ValidationResult],
     *,
+    output_artifact: str,
     extra_parameters: dict[str, Any] | None = None,
     poll_interval_s: float = 3.0,
     job_timeout_s: float = 900.0,
     progress: ProgressCallback | None = None,
     log: "LogCallback | None" = None,
 ) -> tuple[ValidationResult, str]:
-    """Submit an LLM-function job, poll, read its raw-output artifact, and
+    """Submit an LLM-function job, poll, read its stdout artifact, and
     validate client-side; on failure retry ONCE by resubmitting with the
     validation_errors parameter (PRD §4). Returns (result, raw_output).
 
-    The job is attached to the extracted-text artifact (not the RFI/response
-    model) so the platform stages text.txt — not the source PDF — as the
-    function's input.
+    The extracted text is staged as its own Model (_stage_text_model) once,
+    then the job is submitted against that model — reused across the retry
+    attempt, since the input text doesn't change, only validation_errors.
 
     Used by interactive Stage 1; Stage 2 drives the same steps through the
     persisted state machine instead so every step checkpoints.
     """
-    text_artifact = _find_text_artifact(istari, model_id)
+    text_model = _stage_text_model(
+        istari, model_id, display_name=f"extracted-text-{model_id}", log=log,
+    )
     errors: list[str] | None = None
     result = ValidationResult()
     raw = ""
     for _attempt in range(2):
-        params = _llm_parameters(
-            llm_config, text_artifact, origin_resource_id=model_id,
-            extra=extra_parameters, validation_errors=errors,
-        )
+        params = _llm_parameters(llm_config, extra=extra_parameters, validation_errors=errors)
         _log_llm_submission(
-            log, function=function, attached_resource=text_artifact.artifact_id,
-            origin_resource=model_id, parameters=params,
-            credentials=llm_config.credentials,
+            log, function=function, attached_resource=text_model.model_id,
+            parameters=params, credentials=llm_config.credentials,
         )
         job_id = istari.submit_llm_job(
-            text_artifact.artifact_id, function, params, llm_config.credentials
+            text_model.model_id, function, params, llm_config.credentials
         )
         _log(log, f"LLM job submitted: job_id={job_id}")
         _notify(progress, "llm", f"LLM job {job_id} submitted ({function})")
@@ -478,12 +511,23 @@ def run_llm_job_validated(
             poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
             progress=progress, kind="LLM", progress_state="llm",
         )
-        raw = _read_llm_output(istari, [text_artifact.artifact_id, model_id], log=log)
+        try:
+            raw = _read_llm_output(
+                istari, text_model.model_id, output_artifact=output_artifact, log=log
+            )
+        except IstariError as e:
+            stderr = _read_llm_stderr(istari, text_model.model_id, log=log)
+            if stderr:
+                _log(log, f"LLM job {job_id} stderr:\n{stderr}")
+            raise PipelineError(f"LLM job {job_id} produced no readable output: {e}") from e
         _notify(progress, "validating", f"LLM job {job_id} output")
         result = validator(raw)
         if result.ok:
             return result, raw
         errors = result.errors
+        stderr = _read_llm_stderr(istari, text_model.model_id, log=log)
+        if stderr:
+            _log(log, f"LLM job {job_id} stderr (validation failed):\n{stderr}")
     return result, raw
 
 
@@ -570,6 +614,8 @@ def run_stage1_extraction(
     result, raw = run_llm_job_validated(
         istari, rfi_uuid, LLM_FUNCTION_EXTRACT_RFI, llm_config,
         validate_requirements,
+        output_artifact=LLM_RFI_OUTPUT_ARTIFACT,
+        extra_parameters={"rfi_uuid": rfi_uuid, "rfi_rev": rfi_revision_id},
         poll_interval_s=poll_interval_s, job_timeout_s=job_timeout_s,
         progress=progress, log=log,
     )
@@ -827,25 +873,33 @@ def process_response(
 
             elif record.state is PipelineState.TEXT_RETRIEVED:
                 _notify(progress, "llm", record.uuid)
-                text_artifact = _find_text_artifact(istari, record.uuid)
+                text_model = _stage_text_model(
+                    istari, record.uuid, display_name=f"extracted-text-{record.uuid}",
+                    log=log,
+                )
+                record.llm_input_model_id = text_model.model_id
                 params = _llm_parameters(
-                    llm_config, text_artifact, origin_resource_id=record.uuid,
-                    extra={"requirements_json": requirements_json},
+                    llm_config,
+                    extra={
+                        "response_uuid": record.uuid,
+                        "response_rev": record.revision,
+                        "requirements_json": requirements_json,
+                    },
                 )
                 _log_llm_submission(
                     log, function=LLM_FUNCTION_EXTRACT_RESPONSE,
-                    attached_resource=text_artifact.artifact_id,
-                    origin_resource=record.uuid, parameters=params,
+                    attached_resource=text_model.model_id, parameters=params,
                     credentials=llm_config.credentials,
                 )
                 record.llm_job_id = istari.submit_llm_job(
-                    text_artifact.artifact_id, LLM_FUNCTION_EXTRACT_RESPONSE, params,
+                    text_model.model_id, LLM_FUNCTION_EXTRACT_RESPONSE, params,
                     llm_config.credentials,
                 )
                 record.llm_attempts = 1
                 record.transition(PipelineState.LLM_JOB_SUBMITTED)
                 save_project(project, project_path)
-                _log(log, f"response {record.uuid}: LLM job {record.llm_job_id}")
+                _log(log, f"response {record.uuid}: LLM job {record.llm_job_id} "
+                          f"(input model {text_model.model_id})")
 
             elif record.state is PipelineState.LLM_JOB_SUBMITTED:
                 if record.llm_job_id is None:  # corrupt evidence (FR11)
@@ -868,9 +922,15 @@ def process_response(
 
             elif record.state is PipelineState.LLM_RETURNED:
                 _notify(progress, "validating", record.uuid)
+                if record.llm_input_model_id is None:  # corrupt evidence (FR11)
+                    _restart_from_queued(record, project, project_path,
+                                         "no LLM input model id persisted", log,
+                                         restarts)
+                    continue
                 try:  # the raw-output artifact IS the checkpoint (§3.6b)
                     raw = _read_llm_output(
-                        istari, _llm_output_candidates(istari, record.uuid), log=log
+                        istari, record.llm_input_model_id,
+                        output_artifact=LLM_RESPONSE_OUTPUT_ARTIFACT, log=log,
                     )
                 except IstariError as e:
                     _restart_from_queued(record, project, project_path,
@@ -879,6 +939,9 @@ def process_response(
                     continue
                 result = validate_answers(raw, requirements)
                 if not result.ok:
+                    stderr = _read_llm_stderr(istari, record.llm_input_model_id, log=log)
+                    if stderr:
+                        _log(log, f"response {record.uuid}: LLM job stderr:\n{stderr}")
                     if record.llm_attempts < 2:  # retry ONCE (§4), crash-safe
                         _log(log, f"response {record.uuid}: validation failed — "
                                   "resubmitting LLM job with validation_errors")
@@ -887,20 +950,24 @@ def process_response(
                         # granting a second one (§3.6b)
                         record.llm_attempts += 1
                         save_project(project, project_path)
-                        text_artifact = _find_text_artifact(istari, record.uuid)
+                        # reuse the same staged text model — the input hasn't
+                        # changed, only validation_errors
                         params = _llm_parameters(
-                            llm_config, text_artifact, origin_resource_id=record.uuid,
-                            extra={"requirements_json": requirements_json},
+                            llm_config,
+                            extra={
+                                "response_uuid": record.uuid,
+                                "response_rev": record.revision,
+                                "requirements_json": requirements_json,
+                            },
                             validation_errors=result.errors,
                         )
                         _log_llm_submission(
                             log, function=LLM_FUNCTION_EXTRACT_RESPONSE,
-                            attached_resource=text_artifact.artifact_id,
-                            origin_resource=record.uuid, parameters=params,
-                            credentials=llm_config.credentials,
+                            attached_resource=record.llm_input_model_id,
+                            parameters=params, credentials=llm_config.credentials,
                         )
                         record.llm_job_id = istari.submit_llm_job(
-                            text_artifact.artifact_id, LLM_FUNCTION_EXTRACT_RESPONSE,
+                            record.llm_input_model_id, LLM_FUNCTION_EXTRACT_RESPONSE,
                             params, llm_config.credentials,
                         )
                         record.transition(PipelineState.LLM_JOB_SUBMITTED)
@@ -938,10 +1005,16 @@ def process_response(
                             _log(log, f"response {record.uuid}: adopted existing "
                                       f"answers artifact {info_art.artifact_id}")
                             continue
+                    if record.llm_input_model_id is None:  # corrupt evidence (FR11)
+                        _restart_from_queued(record, project, project_path,
+                                             "no LLM input model id persisted", log,
+                                             restarts)
+                        continue
                     try:
                         raw = _read_llm_output(
-                            istari, _llm_output_candidates(istari, record.uuid), log=log
-                        )
+                        istari, record.llm_input_model_id,
+                        output_artifact=LLM_RESPONSE_OUTPUT_ARTIFACT, log=log,
+                    )
                     except IstariError as e:
                         _restart_from_queued(record, project, project_path,
                                              f"LLM output artifact unusable ({e})", log,

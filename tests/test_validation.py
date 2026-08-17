@@ -6,7 +6,10 @@ import json
 
 import pytest
 
-from rfi_manager.istari_adapter import LLM_FUNCTION_EXTRACT_RESPONSE
+from rfi_manager.istari_adapter import (
+    LLM_FUNCTION_EXTRACT_RESPONSE,
+    LLM_RESPONSE_OUTPUT_ARTIFACT,
+)
 from rfi_manager.pipeline import (
     LLMJobConfig,
     run_llm_job_validated,
@@ -228,6 +231,7 @@ def run_job(istari, model_id, config=None):
         istari, model_id, LLM_FUNCTION_EXTRACT_RESPONSE,
         config or LLMJobConfig(credentials=istari.default_credentials()),
         lambda t: validate_answers(t, REQS),
+        output_artifact=LLM_RESPONSE_OUTPUT_ARTIFACT,
         poll_interval_s=0,
     )
 

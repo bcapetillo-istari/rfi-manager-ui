@@ -18,7 +18,9 @@ from typing import Any
 
 from rfi_manager.istari_adapter import (
     EXTRACT_TEXT_ARTIFACT,
-    LLM_OUTPUT_ARTIFACT,
+    LLM_FUNCTION_EXTRACT_RFI,
+    LLM_RESPONSE_OUTPUT_ARTIFACT,
+    LLM_RFI_OUTPUT_ARTIFACT,
     ArtifactInfo,
     CredentialInfo,
     CredentialSelection,
@@ -55,6 +57,7 @@ class FakeIstari:
         self.link_calls: list[tuple[str, str]] = []
         self.job_submissions: list[str] = []  # extraction jobs, by model id
         self.llm_calls: list[dict[str, Any]] = []  # submitted LLM jobs
+        self.register_text_model_calls: list[dict[str, Any]] = []
 
     # ------------------------------------------------------- test helpers
 
@@ -146,7 +149,11 @@ class FakeIstari:
             if not self.llm_outputs:
                 raise AssertionError("FakeIstari ran out of queued LLM outputs")
             raw = self.llm_outputs.pop(0)
-            self._add_artifact(job["model_id"], LLM_OUTPUT_ARTIFACT, raw)
+            output_artifact = (
+                LLM_RFI_OUTPUT_ARTIFACT if job["function"] == LLM_FUNCTION_EXTRACT_RFI
+                else LLM_RESPONSE_OUTPUT_ARTIFACT
+            )
+            self._add_artifact(job["model_id"], output_artifact, raw)
             job["output_written"] = True
 
     # ------------------------------------------------- adapter interface
@@ -163,6 +170,27 @@ class FakeIstari:
         if revision_id not in self.revision_owner:
             raise IstariError(f"cannot resolve revision {revision_id}: not found")
         return self.revision_owner[revision_id]
+
+    def register_text_model(
+        self, text: str, *, display_name: str, source_revision_id: str | None = None,
+    ) -> ModelInfo:
+        """Registers ``text`` as a standalone Model — mirrors the real
+        adapter's add_model-based staging workaround (LLM jobs can only
+        stage a genuine Model's own revision as input)."""
+        model_id = f"model-{next(self._seq)}"
+        rev_id = f"{model_id}-rev-1"
+        info = ModelInfo(
+            model_id=model_id, name=display_name, file_id=f"{model_id}-file",
+            latest_revision_id=rev_id, revision_ids=(rev_id,),
+        )
+        self.models[model_id] = info
+        self.artifacts[model_id] = []
+        self.revision_owner[rev_id] = model_id
+        self.register_text_model_calls.append(
+            {"model_id": model_id, "text": text, "display_name": display_name,
+             "source_revision_id": source_revision_id}
+        )
+        return info
 
     def submit_extraction_job(self, model_id: str) -> str:
         if model_id not in self.models:
@@ -184,7 +212,7 @@ class FakeIstari:
             raise IstariError(f"cannot submit LLM job for {model_id}: not found")
         job_id = f"llmjob-{next(self._seq)}"
         self.jobs[job_id] = {"model_id": model_id, "state": JobState.RUNNING,
-                             "kind": "llm"}
+                             "kind": "llm", "function": function}
         self.llm_calls.append(
             {"job_id": job_id, "model_id": model_id, "function": function,
              "parameters": parameters, "credentials": credentials}

@@ -107,29 +107,65 @@ EXTRACT_TEXT_ARTIFACT = "text.txt"
 _EXTRACT_TEXT_ARTIFACT = EXTRACT_TEXT_ARTIFACT  # back-compat alias
 
 # ---------------------------------------------------------------------------
-# @istari_utils:rfi_manager module contract (docs/LLM_Call_Flow.md).
-# The module is not deployed yet; every identifier the UI depends on lives
-# here so delivery is a constants change. tool_name/tool_version/OS are None
-# until the deployed manifest fixes them.
+# @istari_utils:rfi_manager module contract — fetched LIVE from the deployed
+# function_schema on 2026-08-14 (module_version 1.1.0) via get_function /
+# get_function_schema. This is verified ground truth, not a guess:
+#
+# extract_rfi_requirements inputs:
+#   input_model (user_model, @extension:txt/pdf/docx/xlsx) — required
+#   provider, model, validation_errors, rfi_uuid, rfi_rev — optional parameters
+#   llm_auth (auth_info, @token:llm) — required
+# extract_response_requirements inputs: same, plus
+#   requirements_json (parameter) — required
+#   response_uuid, response_rev instead of rfi_uuid/rfi_rev
+# Both outputs: stdout, stderr, working_directory (file/file/directory,
+# all uploaded as artifacts). Verified live against a real completed job
+# (2026-08-17): cl_module flattens every file it produces into individual
+# same-named artifacts on the model — there is no nested "working_directory"
+# artifact to browse, and nothing is literally named "stdout"/"stderr".
+# cl_module's own wrapper log lands as istari-module-stdout.txt /
+# istari-module-stderr.txt; the inner script's own stdout/stderr (just a
+# "Done — ..." print) land as stdout.log / stderr.log; the script's actual
+# JSON result is a separate flat artifact named by its --output default:
+# requirements_raw.json (Stage 1) / answers_raw.json (Stage 2).
+#
+# input_model MUST be a genuine Model's own revision — NOT an artifact.
+# Verified live: attaching a job directly to an artifact resource ID produces
+# "Could not load file" in Job Details and the job hangs (add_job's own
+# docstring says "Add a new job to a model"; the SDK has a private
+# _create_model_job method — jobs are model-scoped by design). Attaching to
+# the RFI/response model itself stages that model's own latest revision
+# (the PDF), never an artifact hanging off it. The only way to get the
+# extracted text staged as input_model is to register it as its own
+# standalone Model first (register_text_model), then attach the job there.
 # ---------------------------------------------------------------------------
 LLM_FUNCTION_EXTRACT_RFI = "@istari_utils:extract_rfi_requirements"
 LLM_FUNCTION_EXTRACT_RESPONSE = "@istari_utils:extract_response_requirements"
-LLM_TOOL_NAME: str | None = None
-LLM_TOOL_VERSION: str | None = None
-LLM_OS: str | None = None
-LLM_OUTPUT_ARTIFACT = "llm_output.json"
-# auth_info input names in the module manifest
+LLM_TOOL_NAME: str | None = "llm"
+LLM_TOOL_VERSION: str | None = "1.0"
+LLM_OS: str | None = (
+    None  # "Ubuntu 24.04" per the manifest; left unset (untested as an OS enum value)
+)
+LLM_RFI_OUTPUT_ARTIFACT = "requirements_raw.json"
+LLM_RESPONSE_OUTPUT_ARTIFACT = "answers_raw.json"
+LLM_STDERR_ARTIFACT = "stderr.log"
+# auth_info input name in the module manifest (verified: no istari_auth input
+# exists — binding one returns 400 "Credential Binding Mismatch")
 LLM_AUTH_INPUT = "llm_auth"
 ISTARI_AUTH_INPUT = "istari_auth"
-# The deployed functions declare no istari_auth auth_info input (verified
-# live 2026-08-14: binding it returns 400 "Credential Binding Mismatch").
-# Flip this on if the manifest ever adds one.
 LLM_FUNCTION_NEEDS_ISTARI_AUTH = False
 
 # Relationship type used to link uploaded artifacts to their source revision.
 _LINK_TYPE_NAME = "produces"
 
-_RUNNING_STATUSES = {"Created", "Pending", "Claimed", "Validating", "Running", "Uploading"}
+_RUNNING_STATUSES = {
+    "Created",
+    "Pending",
+    "Claimed",
+    "Validating",
+    "Running",
+    "Uploading",
+}
 
 
 class IstariAdapter:
@@ -204,6 +240,51 @@ class IstariAdapter:
             raise IstariError(f"revision {revision_id} has no owning resource")
         return resource_id
 
+    def register_text_model(
+        self, text: str, *, display_name: str, source_revision_id: str | None = None
+    ) -> ModelInfo:
+        """``client.add_model(path=<temp .txt file>, ...)`` — registers
+        ``text`` as a standalone Model. LLM jobs stage a Model's own revision
+        as their ``input_model``; artifacts and a model's own non-text
+        revision (e.g. the source PDF) cannot be staged that way (verified
+        live 2026-08-14). ``source_revision_id`` (the extracted-text
+        artifact's revision, when known) is recorded as a source for
+        provenance."""
+        from istari_digital_client import NewSource
+
+        sources = (
+            [
+                NewSource(
+                    revision_id=source_revision_id,
+                    relationship_identifier="extracted_text",
+                )
+            ]
+            if source_revision_id
+            else None
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "extracted_text.txt"
+            path.write_text(text, encoding="utf-8")
+            try:
+                model = self._client.add_model(
+                    path=str(path),
+                    display_name=display_name,
+                    description="Extracted text staged as an LLM function job input.",
+                    sources=sources,
+                )
+            except Exception as e:
+                raise IstariError(f"cannot register text model: {e}") from e
+        revisions = model.file.revisions or []
+        if not revisions:
+            raise IstariError("registered text model has no revisions")
+        return ModelInfo(
+            model_id=model.id,
+            name=display_name,
+            file_id=model.file.id,
+            latest_revision_id=revisions[-1].id,
+            revision_ids=tuple(r.id for r in revisions),
+        )
+
     # --------------------------------------------------------------- jobs
 
     def submit_extraction_job(self, model_id: str) -> str:
@@ -220,7 +301,9 @@ class IstariAdapter:
                 parameters={},
             )
         except Exception as e:
-            raise IstariError(f"cannot submit extraction job for {model_id}: {e}") from e
+            raise IstariError(
+                f"cannot submit extraction job for {model_id}: {e}"
+            ) from e
         return job.id
 
     def submit_llm_job(
@@ -236,9 +319,20 @@ class IstariAdapter:
         Submits one of the @istari_utils:rfi_manager LLM functions. The
         selected Linked Accounts are bound by credential id — no key material
         ever enters parameters (PRD §3.3/§3.4).
+
+        Every input in the deployed function_schema is declared
+        ``@mime_type:plain/text`` — the module's own scripts json.loads()
+        their own parameters (verified live 2026-08-17: passing
+        requirements_json as a real list, not a JSON string, crashed the
+        agent's env-var setup with "str expected, not list"). JSON-encode
+        any non-string value here so callers can pass native Python values.
         """
         from istari_digital_client import NewCredentialBinding
 
+        parameters = {
+            k: (v if isinstance(v, str) else json.dumps(v))
+            for k, v in parameters.items()
+        }
         auth_bindings = [
             NewCredentialBinding(
                 input_name=LLM_AUTH_INPUT,
@@ -263,7 +357,9 @@ class IstariAdapter:
                 auth_bindings=auth_bindings,
             )
         except Exception as e:
-            raise IstariError(f"cannot submit LLM job ({function}) for {model_id}: {e}") from e
+            raise IstariError(
+                f"cannot submit LLM job ({function}) for {model_id}: {e}"
+            ) from e
         return job.id
 
     def list_credentials(self) -> list[CredentialInfo]:
