@@ -88,13 +88,12 @@ class CredentialInfo:
 
 @dataclass(frozen=True)
 class CredentialSelection:
-    """Credentials bound to LLM jobs (by reference, never by value). The LLM
-    provider key is always required; the agent-side Istari token only when
-    the deployed manifest declares an istari_auth input
-    (LLM_FUNCTION_NEEDS_ISTARI_AUTH)."""
+    """Credential bound to LLM jobs (by reference, never by value). The
+    deployed @istari_utils:rfi_manager functions declare exactly one
+    auth_info input, llm_auth — verified live: binding an istari_auth input
+    returns 400 "Credential Binding Mismatch" since no such input exists."""
 
     llm_credential_id: str
-    istari_credential_id: str | None = None
 
 
 # The Istari extraction function produces text.txt among its artifacts
@@ -152,8 +151,6 @@ LLM_STDERR_ARTIFACT = "stderr.log"
 # auth_info input name in the module manifest (verified: no istari_auth input
 # exists — binding one returns 400 "Credential Binding Mismatch")
 LLM_AUTH_INPUT = "llm_auth"
-ISTARI_AUTH_INPUT = "istari_auth"
-LLM_FUNCTION_NEEDS_ISTARI_AUTH = False
 
 # Relationship type used to link uploaded artifacts to their source revision.
 _LINK_TYPE_NAME = "produces"
@@ -317,8 +314,9 @@ class IstariAdapter:
         auth_bindings=[NewCredentialBinding(...)])`` -> job id.
 
         Submits one of the @istari_utils:rfi_manager LLM functions. The
-        selected Linked Accounts are bound by credential id — no key material
-        ever enters parameters (PRD §3.3/§3.4).
+        selected Linked Account is bound by credential id — no key material
+        ever enters parameters (PRD §3.3/§3.4). The deployed functions
+        declare exactly one auth_info input, llm_auth.
 
         Every input in the deployed function_schema is declared
         ``@mime_type:plain/text`` — the module's own scripts json.loads()
@@ -339,13 +337,6 @@ class IstariAdapter:
                 credential_id=credentials.llm_credential_id,
             ),
         ]
-        if LLM_FUNCTION_NEEDS_ISTARI_AUTH and credentials.istari_credential_id:
-            auth_bindings.append(
-                NewCredentialBinding(
-                    input_name=ISTARI_AUTH_INPUT,
-                    credential_id=credentials.istari_credential_id,
-                )
-            )
         try:
             job = self._client.add_job(
                 model_id,

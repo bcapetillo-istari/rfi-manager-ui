@@ -98,14 +98,10 @@ class FakeIstari:
         return cred
 
     def default_credentials(self) -> CredentialSelection:
-        """One Istari + one LLM credential, created on first use."""
+        """One LLM credential, created on first use."""
         if not self.credentials:
-            self.add_credential("istari-pat", auth_type="istari")
             self.add_credential("llm-key", auth_type="llm")
-        return CredentialSelection(
-            llm_credential_id=self.credentials[1].credential_id,
-            istari_credential_id=self.credentials[0].credential_id,
-        )
+        return CredentialSelection(llm_credential_id=self.credentials[0].credential_id)
 
     def queue_llm_output(self, raw: str) -> None:
         self.llm_outputs.append(raw)

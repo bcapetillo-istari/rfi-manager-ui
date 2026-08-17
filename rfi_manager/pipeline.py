@@ -422,8 +422,7 @@ def _log_llm_submission(
     _log(
         log,
         f"LLM job submit: function={function} attached_to={attached_resource} "
-        f"credentials(llm={credentials.llm_credential_id}, "
-        f"istari={credentials.istari_credential_id}) "
+        f"credentials(llm={credentials.llm_credential_id}) "
         f"parameters={parameters}",
     )
 

@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
 from .. import pipeline
 from ..config import IstariConfig
 from ..istari_adapter import (
-    LLM_FUNCTION_NEEDS_ISTARI_AUTH,
     CredentialInfo,
     CredentialSelection,
 )
@@ -153,15 +152,11 @@ class MainWindow(QMainWindow):
 
         self.addToolBarBreak()
 
-        # Linked Accounts bound to every LLM job (docs/LLM_Call_Flow.md):
+        # Linked Account bound to every LLM job (docs/LLM_Call_Flow.md):
         # populated from list_credentials(), stored by credential id.
         cred_bar = QToolBar("Credentials")
         cred_bar.setMovable(False)
         self.addToolBar(cred_bar)
-        cred_bar.addWidget(QLabel(" Istari token: "))
-        self.istari_cred_combo = QComboBox()
-        self.istari_cred_combo.setMinimumWidth(160)
-        cred_bar.addWidget(self.istari_cred_combo)
         cred_bar.addWidget(QLabel(" LLM token: "))
         self.llm_cred_combo = QComboBox()
         self.llm_cred_combo.setMinimumWidth(160)
@@ -256,47 +251,39 @@ class MainWindow(QMainWindow):
         self._spawn(worker)
 
     def _on_credentials_listed(self, credentials: list[CredentialInfo]) -> None:
-        for combo, wanted in (
-            (self.istari_cred_combo, "istari"),
-            (self.llm_cred_combo, "llm"),
-        ):
-            selected = combo.currentData()
-            combo.clear()
-            for cred in credentials:
-                label = cred.name + (f" ({cred.auth_type})" if cred.auth_type else "")
-                combo.addItem(label, cred.credential_id)
-            restored = False
-            if selected is not None:
-                index = combo.findData(selected)
-                if index >= 0:  # keep the user's manual choice across refreshes
-                    combo.setCurrentIndex(index)
-                    restored = True
-            if not restored:  # heuristic preselect by auth_type tag
-                for i, cred in enumerate(credentials):
-                    if cred.auth_type and wanted in cred.auth_type.lower():
-                        combo.setCurrentIndex(i)
-                        break
+        combo = self.llm_cred_combo
+        selected = combo.currentData()
+        combo.clear()
+        for cred in credentials:
+            label = cred.name + (f" ({cred.auth_type})" if cred.auth_type else "")
+            combo.addItem(label, cred.credential_id)
+        restored = False
+        if selected is not None:
+            index = combo.findData(selected)
+            if index >= 0:  # keep the user's manual choice across refreshes
+                combo.setCurrentIndex(index)
+                restored = True
+        if not restored:  # heuristic preselect by auth_type tag
+            for i, cred in enumerate(credentials):
+                if cred.auth_type and "llm" in cred.auth_type.lower():
+                    combo.setCurrentIndex(i)
+                    break
         self.log(f"{len(credentials)} linked account(s) available")
 
     def _llm_job_config(self) -> LLMJobConfig | None:
-        """Selected credentials + configured provider/model defaults; None
-        (with a warning) when a required credential is not selected."""
-        istari_id = self.istari_cred_combo.currentData()
+        """Selected credential + configured provider/model defaults; None
+        (with a warning) when no credential is selected."""
         llm_id = self.llm_cred_combo.currentData()
-        missing_istari = LLM_FUNCTION_NEEDS_ISTARI_AUTH and not istari_id
-        if not llm_id or missing_istari:
+        if not llm_id:
             QMessageBox.warning(
                 self,
                 "No credentials",
-                "Select an LLM token"
-                + (" and an Istari token" if LLM_FUNCTION_NEEDS_ISTARI_AUTH else "")
-                + " in the credentials bar first (Linked Accounts on the platform).",
+                "Select an LLM token in the credentials bar first "
+                "(Linked Accounts on the platform).",
             )
             return None
         return LLMJobConfig(
-            credentials=CredentialSelection(
-                llm_credential_id=llm_id, istari_credential_id=istari_id
-            ),
+            credentials=CredentialSelection(llm_credential_id=llm_id),
             provider=self._llm_provider,
             model=self._llm_model,
         )
