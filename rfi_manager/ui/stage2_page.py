@@ -23,20 +23,20 @@ _COLUMNS = ["response UUID", "state", "detail"]
 
 
 class Stage2Page(QWidget):
-    ingest_requested = Signal(list, bool)  # (uuids, force)
-    retry_requested = Signal(str)  # response uuid
+    ingest_requested = Signal(list, bool)  # (revision_ids, force)
+    retry_requested = Signal(str)  # response uuid (model id)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._busy = False
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("Response UUID:"))
+        layout.addWidget(QLabel("Response Revision UUID:"))
         self.single_edit = QLineEdit()
-        self.single_edit.setPlaceholderText("Istari UUID of one response PDF")
+        self.single_edit.setPlaceholderText("Istari Revision UUID of one response PDF")
         layout.addWidget(self.single_edit)
 
-        layout.addWidget(QLabel("Batch (one UUID per line):"))
+        layout.addWidget(QLabel("Batch (one Revision UUID per line):"))
         self.batch_edit = QPlainTextEdit()
         self.batch_edit.setMaximumHeight(90)
         layout.addWidget(self.batch_edit)
@@ -65,20 +65,20 @@ class Stage2Page(QWidget):
 
     # -------------------------------------------------------------- input
 
-    def _collect_uuids(self) -> list[str]:
-        uuids = []
+    def _collect_revision_ids(self) -> list[str]:
+        revision_ids = []
         if self.single_edit.text().strip():
-            uuids.append(self.single_edit.text().strip())
+            revision_ids.append(self.single_edit.text().strip())
         for line in self.batch_edit.toPlainText().splitlines():
             if line.strip():
-                uuids.append(line.strip())
+                revision_ids.append(line.strip())
         seen: set[str] = set()
-        return [u for u in uuids if not (u in seen or seen.add(u))]
+        return [r for r in revision_ids if not (r in seen or seen.add(r))]
 
     def _on_ingest(self) -> None:
-        uuids = self._collect_uuids()
-        if uuids:
-            self.ingest_requested.emit(uuids, self.force_check.isChecked())
+        revision_ids = self._collect_revision_ids()
+        if revision_ids:
+            self.ingest_requested.emit(revision_ids, self.force_check.isChecked())
 
     def _on_retry(self) -> None:
         row = self.status_table.currentRow()

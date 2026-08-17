@@ -92,7 +92,7 @@ def main() -> None:
     istari.queue_llm_output(ans("Compliant", 38.5))
     istari.queue_llm_output("garbage")
     istari.queue_llm_output("garbage again")
-    win.start_ingest([ra.model_id, rb.model_id], False)
+    win.start_ingest([ra.latest_revision_id, rb.latest_revision_id], False)
     pump(app, lambda: win.project.response_for(rb.model_id)
          and win.project.response_for(rb.model_id).state is PipelineState.FAILED
          and win.project.response_for(ra.model_id).state is PipelineState.DONE,
@@ -165,11 +165,11 @@ def main() -> None:
     # ---- 6. Re-ingest under v1.1; FR5 idempotent skip; FR12 rebuild
     istari.queue_llm_output(ans("Compliant", 38.5))
     istari.queue_llm_output(ans("Partial", 41.0, "low"))
-    win2.start_ingest([ra.model_id, rb.model_id], False)
+    win2.start_ingest([ra.latest_revision_id, rb.latest_revision_id], False)
     pump(app, lambda: all(r.state is PipelineState.DONE and r.schema_version == "1.1"
                           for r in win2.project.responses), "re-ingest v1.1")
     llm_calls_before = len(istari.llm_calls)
-    win2.start_ingest([ra.model_id], False)
+    win2.start_ingest([ra.latest_revision_id], False)
     pump(app, lambda: win2.project.response_for(ra.model_id).state
          is PipelineState.DONE, "skip")
     app.processEvents(); time.sleep(0.1); app.processEvents()
@@ -177,7 +177,7 @@ def main() -> None:
 
     # force re-extract on a DONE record must actually re-run (FR5 bypass)
     istari.queue_llm_output(ans("Compliant", 39.0))
-    win2.start_ingest([ra.model_id], True)
+    win2.start_ingest([ra.latest_revision_id], True)
     pump(app, lambda: len(istari.llm_calls) == llm_calls_before + 1
          and win2.project.response_for(ra.model_id).state is PipelineState.DONE,
          "force re-extract re-ran")

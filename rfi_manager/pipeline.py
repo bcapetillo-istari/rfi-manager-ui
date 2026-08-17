@@ -711,6 +711,30 @@ def _log(log: LogCallback | None, message: str) -> None:
         log(message)
 
 
+def resolve_response_revisions(
+    istari: IstariClient, revision_ids: list[str]
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Resolve each user-entered response revision id to its owning model id
+    (Stage 2 now takes a specific file revision, not a model UUID, so a
+    response can be ingested against an exact historical revision rather
+    than always whatever is currently latest). One bad id must not lose the
+    rest of a batch, so failures are collected rather than raised.
+
+    Returns ``(resolved, failed)`` — ``resolved`` as ``(revision_id,
+    model_id)`` pairs, ``failed`` as ``(revision_id, reason)`` pairs.
+    """
+    resolved: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
+    for revision_id in revision_ids:
+        try:
+            model_id = istari.model_id_for_revision(revision_id)
+        except IstariError as e:
+            failed.append((revision_id, str(e)))
+            continue
+        resolved.append((revision_id, model_id))
+    return resolved, failed
+
+
 def find_existing_answers(
     istari: IstariClient,
     response_uuid: str,

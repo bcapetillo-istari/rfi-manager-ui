@@ -442,7 +442,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ stage 2
 
-    def start_ingest(self, uuids: list[str], force: bool) -> None:
+    def start_ingest(self, revision_ids: list[str], force: bool) -> None:
+        """Stage 2 now takes response *revision* ids, not model UUIDs — each
+        is resolved to its owning model off the UI thread before anything
+        else happens."""
         if self._require_connection() is None:
             return
         if self.project is None or self.requirements_artifact is None:
@@ -450,21 +453,47 @@ class MainWindow(QMainWindow):
                 self, "No schema", "Commit a requirements schema first."
             )
             return
+        # _run_responses (reached via _on_revisions_resolved) already guards
+        # against a concurrent batch — checking here too would race it,
+        # since resolution now happens asynchronously.
+        worker = Worker(
+            pipeline.resolve_response_revisions, self._istari, revision_ids
+        )
+        worker.signals.finished.connect(
+            lambda result, f=force: self._on_revisions_resolved(result, f)
+        )
+        worker.signals.failed.connect(
+            lambda reason: self.log(f"response revision lookup FAILED: {reason}")
+        )
+        self._spawn(worker)
+
+    def _on_revisions_resolved(
+        self,
+        result: tuple[list[tuple[str, str]], list[tuple[str, str]]],
+        force: bool,
+    ) -> None:
+        resolved, failed = result
+        for revision_id, reason in failed:
+            self.log(f"cannot resolve response revision {revision_id}: {reason}")
+            self.stage2_page.update_status(revision_id, "failed", reason)
+        if self.project is None:  # project could have been closed meanwhile
+            return
         current_schema = self.project.schema_version
         records: list[ResponseRecord] = []
-        for uuid in uuids:
+        for revision_id, uuid in resolved:
             record = self.project.response_for(uuid)
             if record is None:
-                record = ResponseRecord(uuid=uuid)
+                record = ResponseRecord(uuid=uuid, revision=revision_id)
                 self.project.responses.append(record)
-            elif force or (
+            elif force or record.revision != revision_id or (
                 record.state is PipelineState.DONE
                 and record.schema_version != current_schema
             ):
-                # restart from scratch: force re-extract (FR5), or a DONE
-                # record answered under an older schema (FR3 re-run) —
-                # replace the record, since done has no outgoing edges
-                fresh = ResponseRecord(uuid=uuid)
+                # restart from scratch: force re-extract (FR5), a newly
+                # requested revision of the same response, or a DONE record
+                # answered under an older schema (FR3 re-run) — replace the
+                # record, since done has no outgoing edges
+                fresh = ResponseRecord(uuid=uuid, revision=revision_id)
                 self.project.responses[self.project.responses.index(record)] = fresh
                 record = fresh
             elif record.state is PipelineState.FAILED:

@@ -55,10 +55,18 @@ RESUMABLE_STATES = frozenset(
 
 # Legal transitions; anything else is a programming error.
 _TRANSITIONS: dict[PipelineState, frozenset[PipelineState]] = {
-    PipelineState.QUEUED: frozenset({PipelineState.JOB_SUBMITTED, PipelineState.FAILED}),
-    PipelineState.JOB_SUBMITTED: frozenset({PipelineState.TEXT_RETRIEVED, PipelineState.FAILED}),
-    PipelineState.TEXT_RETRIEVED: frozenset({PipelineState.LLM_JOB_SUBMITTED, PipelineState.FAILED}),
-    PipelineState.LLM_JOB_SUBMITTED: frozenset({PipelineState.LLM_RETURNED, PipelineState.FAILED}),
+    PipelineState.QUEUED: frozenset(
+        {PipelineState.JOB_SUBMITTED, PipelineState.FAILED}
+    ),
+    PipelineState.JOB_SUBMITTED: frozenset(
+        {PipelineState.TEXT_RETRIEVED, PipelineState.FAILED}
+    ),
+    PipelineState.TEXT_RETRIEVED: frozenset(
+        {PipelineState.LLM_JOB_SUBMITTED, PipelineState.FAILED}
+    ),
+    PipelineState.LLM_JOB_SUBMITTED: frozenset(
+        {PipelineState.LLM_RETURNED, PipelineState.FAILED}
+    ),
     # llm_returned -> llm_job_submitted is the retry-once resubmission (§4)
     PipelineState.LLM_RETURNED: frozenset(
         {PipelineState.VALIDATED, PipelineState.LLM_JOB_SUBMITTED, PipelineState.FAILED}
