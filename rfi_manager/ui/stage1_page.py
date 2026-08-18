@@ -21,21 +21,36 @@ class Stage1Page(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel("Extract Requirements from an RFI")
+        title.setProperty("role", "section")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Enter the RFI document's Istari UUID, then extract its "
+            "requirements schema with an LLM job."
+        )
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         form = QFormLayout()
+        form.setSpacing(8)
         self.uuid_edit = QLineEdit()
         self.uuid_edit.setPlaceholderText("Istari UUID of the RFI file")
         self.revision_edit = QLineEdit()
-        self.revision_edit.setPlaceholderText("optional — latest revision if empty")
-        form.addRow("RFI UUID:", self.uuid_edit)
-        form.addRow("Revision:", self.revision_edit)
+        self.revision_edit.setPlaceholderText("Optional — uses the latest revision if empty")
+        form.addRow("RFI Document UUID", self.uuid_edit)
+        form.addRow("Revision (optional)", self.revision_edit)
         layout.addLayout(form)
 
-        self.extract_button = QPushButton("Extract requirements")
+        self.extract_button = QPushButton("Extract Requirements")
+        self.extract_button.setObjectName("primaryButton")
         self.extract_button.clicked.connect(self._on_extract)
         layout.addWidget(self.extract_button)
 
         self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
 

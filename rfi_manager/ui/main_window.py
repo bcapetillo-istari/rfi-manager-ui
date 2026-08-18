@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QThreadPool, Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
     QFileDialog,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -22,7 +24,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QStackedWidget,
-    QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import pipeline
@@ -45,6 +48,7 @@ from .comparison_page import ComparisonPage
 from .review_screen import ReviewScreen
 from .stage1_page import Stage1Page
 from .stage2_page import Stage2Page
+from .theme import STYLESHEET
 from .workers import Worker
 
 
@@ -78,6 +82,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("RFI Manager")
         self.resize(1200, 750)
+        self.setStyleSheet(STYLESHEET)
 
         self._istari = istari
         self._adapter_factory = adapter_factory or _default_adapter_factory
@@ -109,63 +114,100 @@ class MainWindow(QMainWindow):
             self.comparison_page,
         ):
             self._stack.addWidget(page)
-        self.setCentralWidget(self._stack)
 
-        toolbar = QToolBar("Navigation")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        toolbar.addAction(
-            "Stage 1: RFI", lambda: self._stack.setCurrentWidget(self.stage1_page)
-        )
-        toolbar.addAction(
-            "Stage 2: Responses", lambda: self._stack.setCurrentWidget(self.stage2_page)
-        )
-        toolbar.addAction(
-            "Compare", lambda: self._stack.setCurrentWidget(self.comparison_page)
-        )
-        toolbar.addSeparator()
-        toolbar.addAction("Open project…", self.open_project_dialog)
-        toolbar.addAction("Open from RFI UUID…", self.open_from_rfi_dialog)
+        # File menu: project open actions (moved off the old toolbar for a
+        # more standard desktop-app layout — same handlers as before).
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction("Open Project…", self.open_project_dialog)
+        file_menu.addAction("Open from RFI UUID…", self.open_from_rfi_dialog)
+
+        # Step navigation: a styled, checkable button row driving _stack.
+        # review_screen has no button of its own — it's reached via the
+        # Stage 1 extraction flow, not navigated to directly.
+        nav_bar = QWidget()
+        nav_layout = QHBoxLayout(nav_bar)
+        nav_layout.setContentsMargins(12, 4, 12, 0)
+        nav_layout.setSpacing(4)
+        self._nav_buttons: dict[int, QPushButton] = {}
+        for index, page, label in (
+            (0, self.stage1_page, "1 · RFI Requirements"),
+            (2, self.stage2_page, "2 · Vendor Responses"),
+            (3, self.comparison_page, "3 · Comparison"),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("navButton")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked, p=page: self._stack.setCurrentWidget(p)
+            )
+            nav_layout.addWidget(button)
+            self._nav_buttons[index] = button
+        nav_layout.addStretch(1)
+        self._nav_buttons[0].setChecked(True)
+        self._stack.currentChanged.connect(self._on_stack_page_changed)
 
         # Connection to the registry comes from the UI, not config.toml
         # (PRD §3.3): URL + PAT typed here, adapter built on Connect. The PAT
         # box is masked and its value never leaves process memory.
-        conn_bar = QToolBar("Connection")
-        conn_bar.setMovable(False)
-        self.addToolBar(conn_bar)
-        conn_bar.addWidget(QLabel(" Registry URL: "))
+        conn_card = QWidget()
+        conn_card.setObjectName("card")
+        conn_layout = QVBoxLayout(conn_card)
+        conn_layout.setContentsMargins(14, 10, 14, 12)
+        conn_layout.setSpacing(6)
+        title = QLabel("Istari Connection")
+        title.setProperty("role", "section")
+        conn_layout.addWidget(title)
+
+        conn_row = QHBoxLayout()
+        conn_row.setSpacing(8)
+        conn_row.addWidget(QLabel("Registry URL"))
         self.registry_url_edit = QLineEdit(registry_url_prefill)
-        self.registry_url_edit.setMinimumWidth(240)
+        self.registry_url_edit.setMinimumWidth(260)
         self.registry_url_edit.setPlaceholderText("https://your-instance.istaridigital.com")
-        conn_bar.addWidget(self.registry_url_edit)
-        conn_bar.addWidget(QLabel(" PAT: "))
+        conn_row.addWidget(self.registry_url_edit)
+        conn_row.addWidget(QLabel("Personal Access Token"))
         self.pat_edit = QLineEdit(pat_prefill)
         self.pat_edit.setMinimumWidth(200)
         self.pat_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.pat_edit.setPlaceholderText("Istari personal access token")
-        conn_bar.addWidget(self.pat_edit)
+        conn_row.addWidget(self.pat_edit)
         self.connect_button = QPushButton("Connect")
+        self.connect_button.setObjectName("primaryButton")
         self.connect_button.clicked.connect(self.connect_to_registry)
-        conn_bar.addWidget(self.connect_button)
+        conn_row.addWidget(self.connect_button)
         self.connection_label = QLabel(" connected (injected)" if istari else " not connected")
-        conn_bar.addWidget(self.connection_label)
-
-        self.addToolBarBreak()
+        self.connection_label.setProperty("role", "hint")
+        conn_row.addWidget(self.connection_label)
+        conn_row.addStretch(1)
+        conn_layout.addLayout(conn_row)
 
         # Linked Account bound to every LLM job (docs/LLM_Call_Flow.md):
         # populated from list_credentials(), stored by credential id.
-        cred_bar = QToolBar("Credentials")
-        cred_bar.setMovable(False)
-        self.addToolBar(cred_bar)
-        cred_bar.addWidget(QLabel(" LLM token: "))
+        cred_row = QHBoxLayout()
+        cred_row.setSpacing(8)
+        cred_row.addWidget(QLabel("LLM Credential"))
         self.llm_cred_combo = QComboBox()
-        self.llm_cred_combo.setMinimumWidth(160)
-        cred_bar.addWidget(self.llm_cred_combo)
-        cred_bar.addAction("Refresh", self.refresh_credentials)
+        self.llm_cred_combo.setMinimumWidth(220)
+        cred_row.addWidget(self.llm_cred_combo)
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.refresh_credentials)
+        cred_row.addWidget(refresh_button)
+        cred_row.addStretch(1)
+        conn_layout.addLayout(cred_row)
+
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(12, 8, 12, 12)
+        central_layout.setSpacing(10)
+        central_layout.addWidget(nav_bar)
+        central_layout.addWidget(conn_card)
+        central_layout.addWidget(self._stack, 1)
+        self.setCentralWidget(central)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        dock = QDockWidget("Session log")
+        self.log_view.setFont(QFont("Menlo, Consolas, monospace"))
+        dock = QDockWidget("Session Log")
         dock.setWidget(self.log_view)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
 
@@ -176,6 +218,14 @@ class MainWindow(QMainWindow):
 
         if self._istari is not None:  # injected adapter (tests/fakes)
             self.refresh_credentials()
+
+    # ------------------------------------------------------- navigation
+
+    def _on_stack_page_changed(self, index: int) -> None:
+        """Keep the step buttons highlighted in sync with _stack, however it
+        got switched (a nav click, or code navigating after a job finishes)."""
+        for page_index, button in self._nav_buttons.items():
+            button.setChecked(page_index == index)
 
     # --------------------------------------------------------- connection
 

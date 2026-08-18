@@ -173,12 +173,19 @@ class ComparisonPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel("Vendor Response Comparison")
+        title.setProperty("role", "section")
+        layout.addWidget(title)
 
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Search:"))
+        controls.setSpacing(8)
+        controls.addWidget(QLabel("Search"))
         self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search vendor, answer, or quote text")
         controls.addWidget(self.search_edit)
-        controls.addWidget(QLabel("Filter:"))
+        controls.addWidget(QLabel("Filter"))
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(FILTERS)
         controls.addWidget(self.filter_combo)
@@ -191,6 +198,7 @@ class ComparisonPage(QWidget):
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
 
         self.detail = QTextEdit()
         self.detail.setReadOnly(True)
@@ -212,6 +220,7 @@ class ComparisonPage(QWidget):
     def load(self, requirements: list[Requirement], rows) -> None:
         self._requirements = requirements
         self.model.set_data(requirements, rows)
+        self.table.resizeColumnsToContents()
         # a model reset clears the selection without a selectionChanged
         # signal — drop the previous data set's detail pane too (FR7)
         self.detail.clear()

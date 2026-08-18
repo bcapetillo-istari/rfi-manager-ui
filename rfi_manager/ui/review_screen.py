@@ -32,30 +32,45 @@ class ReviewScreen(QWidget):
         super().__init__(parent)
         self._busy = False  # a commit is in flight; edits must not re-enable it
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel("Review Extracted Requirements")
+        title.setProperty("role", "section")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Edit, add, or remove rows as needed, then commit the schema "
+            "to Istari."
+        )
+        hint.setProperty("role", "hint")
+        layout.addWidget(hint)
 
         self.table = QTableWidget(0, len(_COLUMNS))
         self.table.setHorizontalHeaderLabels(_COLUMNS)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(lambda _item: self._revalidate())
         layout.addWidget(self.table)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         for label, handler in [
-            ("Add row", self._add_row),
-            ("Delete row", self._delete_row),
-            ("Move up", lambda: self._move_row(-1)),
-            ("Move down", lambda: self._move_row(1)),
+            ("Add Row", self._add_row),
+            ("Delete Row", self._delete_row),
+            ("Move Up", lambda: self._move_row(-1)),
+            ("Move Down", lambda: self._move_row(1)),
         ]:
             b = QPushButton(label)
             b.clicked.connect(handler)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        buttons.addWidget(QLabel("schema_version:"))
+        buttons.addWidget(QLabel("Schema Version"))
         self.schema_edit = QLineEdit("1.0")
         self.schema_edit.setMaximumWidth(80)
         self.schema_edit.textChanged.connect(lambda _t: self._revalidate())
         buttons.addWidget(self.schema_edit)
         self.commit_button = QPushButton("Commit to Istari")
+        self.commit_button.setObjectName("primaryButton")
         self.commit_button.clicked.connect(self._on_commit)
         buttons.addWidget(self.commit_button)
         layout.addLayout(buttons)

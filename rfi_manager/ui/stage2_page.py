@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-_COLUMNS = ["response UUID", "state", "detail"]
+_COLUMNS = ["Response UUID", "State", "Detail"]
 
 
 class Stage2Page(QWidget):
@@ -30,24 +30,38 @@ class Stage2Page(QWidget):
         super().__init__(parent)
         self._busy = False
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
 
-        layout.addWidget(QLabel("Response Revision UUID:"))
+        title = QLabel("Ingest Vendor Responses")
+        title.setProperty("role", "section")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Enter one or more response file revision UUIDs to extract "
+            "answers against the committed requirements schema."
+        )
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        layout.addWidget(QLabel("Response Revision UUID"))
         self.single_edit = QLineEdit()
         self.single_edit.setPlaceholderText("Istari Revision UUID of one response PDF")
         layout.addWidget(self.single_edit)
 
-        layout.addWidget(QLabel("Batch (one Revision UUID per line):"))
+        layout.addWidget(QLabel("Batch (one Revision UUID per line)"))
         self.batch_edit = QPlainTextEdit()
         self.batch_edit.setMaximumHeight(90)
         layout.addWidget(self.batch_edit)
 
         controls = QHBoxLayout()
+        controls.setSpacing(8)
         self.force_check = QCheckBox("Force re-extract")
         controls.addWidget(self.force_check)
-        self.ingest_button = QPushButton("Ingest responses")
+        self.ingest_button = QPushButton("Ingest Responses")
+        self.ingest_button.setObjectName("primaryButton")
         self.ingest_button.clicked.connect(self._on_ingest)
         controls.addWidget(self.ingest_button)
-        self.retry_button = QPushButton("Retry selected")
+        self.retry_button = QPushButton("Retry Selected")
         self.retry_button.setEnabled(False)
         self.retry_button.clicked.connect(self._on_retry)
         controls.addWidget(self.retry_button)
@@ -56,10 +70,14 @@ class Stage2Page(QWidget):
 
         self.status_table = QTableWidget(0, len(_COLUMNS))
         self.status_table.setHorizontalHeaderLabels(_COLUMNS)
+        self.status_table.horizontalHeader().resizeSection(0, 260)
+        self.status_table.horizontalHeader().resizeSection(1, 90)
         self.status_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
         )
         self.status_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.status_table.setAlternatingRowColors(True)
+        self.status_table.verticalHeader().setVisible(False)
         self.status_table.itemSelectionChanged.connect(self._on_selection)
         layout.addWidget(self.status_table)
 
