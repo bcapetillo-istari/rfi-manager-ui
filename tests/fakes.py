@@ -48,6 +48,7 @@ class FakeIstari:
         self.links: list[LinkInfo] = []
         self.credentials: list[CredentialInfo] = []
         self.revision_owner: dict[str, str] = {}  # revision_id -> resource id
+        self.revision_bytes: dict[str, bytes] = {}  # revision_id -> raw content
         self.auto_complete_jobs = True
         self.llm_outputs: list[str] = []  # FIFO consumed by completing LLM jobs
         self.suppress_llm_artifacts = False  # simulate a module writing no output
@@ -61,7 +62,10 @@ class FakeIstari:
 
     # ------------------------------------------------------- test helpers
 
-    def add_model(self, name: str, text: str = "", revisions: int = 1) -> ModelInfo:
+    def add_model(
+        self, name: str, text: str = "", revisions: int = 1,
+        pdf_bytes: bytes | None = None,
+    ) -> ModelInfo:
         model_id = f"model-{next(self._seq)}"
         rev_ids = tuple(f"{model_id}-rev-{i + 1}" for i in range(revisions))
         info = ModelInfo(
@@ -75,6 +79,8 @@ class FakeIstari:
         self.artifacts[model_id] = []
         for rev_id in rev_ids:
             self.revision_owner[rev_id] = model_id
+            if pdf_bytes is not None:
+                self.revision_bytes[rev_id] = pdf_bytes
         if text:
             # like the real platform, text.txt only exists after an
             # extraction job completes (see _complete)
@@ -166,6 +172,13 @@ class FakeIstari:
         if revision_id not in self.revision_owner:
             raise IstariError(f"cannot resolve revision {revision_id}: not found")
         return self.revision_owner[revision_id]
+
+    def read_revision_bytes(self, revision_id: str) -> bytes:
+        if revision_id not in self.revision_owner:
+            raise IstariError(f"cannot read revision {revision_id}: not found")
+        if revision_id not in self.revision_bytes:
+            raise IstariError(f"revision {revision_id} has no stored bytes")
+        return self.revision_bytes[revision_id]
 
     def register_text_model(
         self, text: str, *, display_name: str, source_revision_id: str | None = None,
@@ -259,6 +272,24 @@ class FakeIstari:
         self.upload_calls.append(
             {"model_id": model_id, "name": name, "payload": payload,
              "description": description}
+        )
+        return info
+
+    def upload_text_artifact(
+        self,
+        model_id: str,
+        name: str,
+        text: str,
+        *,
+        source_revision_id: str | None = None,
+        description: str | None = None,
+    ) -> ArtifactInfo:
+        if model_id not in self.models:
+            raise IstariError(f"cannot upload artifact {name}: model not found")
+        info = self._add_artifact(model_id, name, text)
+        self.upload_calls.append(
+            {"model_id": model_id, "name": name, "payload": text,
+             "description": description, "source_revision_id": source_revision_id}
         )
         return info
 

@@ -284,6 +284,19 @@ class IstariAdapter:
 
     # --------------------------------------------------------------- jobs
 
+    def read_revision_bytes(self, revision_id: str) -> bytes:
+        """``client.get_revision(revision_id).read_bytes()`` — FileRevision
+        mixes in the legacy SDK's ``Readable`` capability, so this reads the
+        content straight from storage with no presigned-URL round trip.
+        Used for the DO_CUSTOM_EXTRACTION path (pdf_extraction.py): the raw
+        PDF bytes for local extraction, bypassing Istari's own
+        @istari:extract job entirely."""
+        try:
+            revision = self._client.get_revision(revision_id)
+            return revision.read_bytes()
+        except Exception as e:
+            raise IstariError(f"cannot read revision {revision_id}: {e}") from e
+
     def submit_extraction_job(self, model_id: str) -> str:
         """``client.add_job(model_id, function="@istari:extract",
         tool_name="open_pdf", ...)`` -> job id. Runs Istari's PDF
@@ -449,6 +462,55 @@ class IstariAdapter:
                 artifact = self._client.add_artifact(
                     model_id,
                     path=str(path),
+                    display_name=name,
+                    description=description,
+                )
+            except Exception as e:
+                raise IstariError(f"cannot upload artifact {name}: {e}") from e
+        revisions = artifact.file.revisions or []
+        if not revisions:
+            raise IstariError(f"uploaded artifact {name} has no revisions")
+        return ArtifactInfo(
+            artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
+        )
+
+    def upload_text_artifact(
+        self,
+        model_id: str,
+        name: str,
+        text: str,
+        *,
+        source_revision_id: str | None = None,
+        description: str | None = None,
+    ) -> ArtifactInfo:
+        """``client.add_artifact(model_id, path=<temp file>, sources=[...])``
+        — like ``upload_json_artifact`` but writes ``text`` verbatim (no JSON
+        encoding). Used to record locally-extracted text (pdf_extraction.py,
+        DO_CUSTOM_EXTRACTION) as a ``text.txt`` artifact on the source model
+        — the same artifact name/shape Istari's own @istari:extract job
+        produces — so a model's provenance looks the same regardless of
+        which extraction path ran. ``source_revision_id`` (the source PDF's
+        revision, when known) is recorded as a source for provenance."""
+        from istari_digital_client import NewSource
+
+        sources = (
+            [
+                NewSource(
+                    revision_id=source_revision_id,
+                    relationship_identifier="extracted_from",
+                )
+            ]
+            if source_revision_id
+            else None
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / name
+            path.write_text(text, encoding="utf-8")
+            try:
+                artifact = self._client.add_artifact(
+                    model_id,
+                    path=str(path),
+                    sources=sources,
                     display_name=name,
                     description=description,
                 )

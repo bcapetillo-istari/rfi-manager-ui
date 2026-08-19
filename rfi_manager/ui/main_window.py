@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         job_timeout_s: float = 900.0,
         request_timeout_s: float = 60.0,
         retries: int = 2,
+        do_custom_extraction: bool = False,
     ) -> None:
         """``istari`` may be a ready adapter (tests/fakes) or None — the
         normal flow is: user types Registry URL + PAT into the connection bar
@@ -93,6 +94,7 @@ class MainWindow(QMainWindow):
         self._job_timeout_s = job_timeout_s
         self._request_timeout_s = request_timeout_s
         self._retries = retries
+        self._do_custom_extraction = do_custom_extraction
         self._pool = QThreadPool.globalInstance()
         self._workers: list[Worker] = []  # keep refs while running
 
@@ -163,7 +165,9 @@ class MainWindow(QMainWindow):
         conn_row.addWidget(QLabel("Registry URL"))
         self.registry_url_edit = QLineEdit(registry_url_prefill)
         self.registry_url_edit.setMinimumWidth(260)
-        self.registry_url_edit.setPlaceholderText("https://your-instance.istaridigital.com")
+        self.registry_url_edit.setPlaceholderText(
+            "https://your-instance.istaridigital.com"
+        )
         conn_row.addWidget(self.registry_url_edit)
         conn_row.addWidget(QLabel("Personal Access Token"))
         self.pat_edit = QLineEdit(pat_prefill)
@@ -175,7 +179,9 @@ class MainWindow(QMainWindow):
         self.connect_button.setObjectName("primaryButton")
         self.connect_button.clicked.connect(self.connect_to_registry)
         conn_row.addWidget(self.connect_button)
-        self.connection_label = QLabel(" connected (injected)" if istari else " not connected")
+        self.connection_label = QLabel(
+            " connected (injected)" if istari else " not connected"
+        )
         self.connection_label.setProperty("role", "hint")
         conn_row.addWidget(self.connection_label)
         conn_row.addStretch(1)
@@ -233,7 +239,8 @@ class MainWindow(QMainWindow):
         """The connected adapter, or None with a warning shown."""
         if self._istari is None:
             QMessageBox.warning(
-                self, "Not connected",
+                self,
+                "Not connected",
                 "Enter the Registry URL and your PAT in the connection bar "
                 "and click Connect first.",
             )
@@ -246,8 +253,9 @@ class MainWindow(QMainWindow):
         url = self.registry_url_edit.text().strip()
         pat = self.pat_edit.text().strip()
         if not url or not pat:
-            QMessageBox.warning(self, "Missing fields",
-                                "Enter both the Registry URL and a PAT.")
+            QMessageBox.warning(
+                self, "Missing fields", "Enter both the Registry URL and a PAT."
+            )
             return
         config = IstariConfig(
             base_url=url,
@@ -390,6 +398,7 @@ class MainWindow(QMainWindow):
             llm_config,
             rfi_uuid,
             revision_id=revision_id or None,
+            do_custom_extraction=self._do_custom_extraction,
             poll_interval_s=self._poll_interval_s,
             job_timeout_s=self._job_timeout_s,
             send_progress=True,
@@ -506,9 +515,7 @@ class MainWindow(QMainWindow):
         # _run_responses (reached via _on_revisions_resolved) already guards
         # against a concurrent batch — checking here too would race it,
         # since resolution now happens asynchronously.
-        worker = Worker(
-            pipeline.resolve_response_revisions, self._istari, revision_ids
-        )
+        worker = Worker(pipeline.resolve_response_revisions, self._istari, revision_ids)
         worker.signals.finished.connect(
             lambda result, f=force: self._on_revisions_resolved(result, f)
         )
@@ -535,9 +542,13 @@ class MainWindow(QMainWindow):
             if record is None:
                 record = ResponseRecord(uuid=uuid, revision=revision_id)
                 self.project.responses.append(record)
-            elif force or record.revision != revision_id or (
-                record.state is PipelineState.DONE
-                and record.schema_version != current_schema
+            elif (
+                force
+                or record.revision != revision_id
+                or (
+                    record.state is PipelineState.DONE
+                    and record.schema_version != current_schema
+                )
             ):
                 # restart from scratch: force re-extract (FR5), a newly
                 # requested revision of the same response, or a DONE record
@@ -611,6 +622,7 @@ class MainWindow(QMainWindow):
                     record,
                     req_artifact,
                     force=force,
+                    do_custom_extraction=self._do_custom_extraction,
                     poll_interval_s=poll,
                     job_timeout_s=timeout,
                     progress=per_response,

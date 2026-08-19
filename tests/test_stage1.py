@@ -78,6 +78,36 @@ def test_stage1_extraction_end_to_end():
         < states.index("validating")
 
 
+def test_stage1_custom_extraction_skips_istari_extraction_job(monkeypatch):
+    istari = FakeIstari()
+    rfi = istari.add_model("rfi.pdf", pdf_bytes=b"%PDF-fake%")
+    istari.queue_llm_output(REQS_JSON)
+    monkeypatch.setattr(
+        "rfi_manager.pipeline.pdf_extraction.extract_text",
+        lambda pdf_bytes: f"extracted:{pdf_bytes.decode()}",
+    )
+
+    result = run_stage1_extraction(
+        istari, make_config(istari), rfi.model_id,
+        do_custom_extraction=True, poll_interval_s=0,
+    )
+
+    assert [r.id for r in result.requirements] == ["C-01", "C-02"]
+    assert istari.job_submissions == []  # no Istari extraction job submitted
+
+    # provenance parity: the custom-extracted text is still recorded as a
+    # text.txt artifact on the RFI model, same as a real extraction job would
+    text_artifact = istari.find_artifact(rfi.model_id, "text.txt")
+    assert text_artifact is not None
+    [upload_call] = [c for c in istari.upload_calls if c["name"] == "text.txt"]
+    assert upload_call["payload"] == "extracted:%PDF-fake%"
+    assert upload_call["source_revision_id"] == rfi.latest_revision_id
+
+    [register_call] = istari.register_text_model_calls
+    assert register_call["text"] == "extracted:%PDF-fake%"
+    assert register_call["source_revision_id"] == text_artifact.revision_id
+
+
 def test_stage1_unknown_revision_fails():
     istari = FakeIstari()
     rfi = istari.add_model("rfi.pdf", text="T")

@@ -32,6 +32,7 @@ from .models import (
     Requirement,
     RequirementsArtifact,
 )
+from . import pdf_extraction
 
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
 
@@ -293,6 +294,7 @@ class IstariClient(Protocol):
 
     def get_model_info(self, model_id: str) -> ModelInfo: ...
     def model_id_for_revision(self, revision_id: str) -> str: ...
+    def read_revision_bytes(self, revision_id: str) -> bytes: ...
     def register_text_model(
         self, text: str, *, display_name: str, source_revision_id: str | None = None,
     ) -> ModelInfo: ...
@@ -308,6 +310,10 @@ class IstariClient(Protocol):
     def upload_json_artifact(
         self, model_id: str, name: str, payload: dict[str, Any],
         *, description: str | None = None,
+    ) -> ArtifactInfo: ...
+    def upload_text_artifact(
+        self, model_id: str, name: str, text: str,
+        *, source_revision_id: str | None = None, description: str | None = None,
     ) -> ArtifactInfo: ...
     def list_json_artifacts(
         self, model_id: str, name: str
@@ -373,6 +379,8 @@ def _find_text_artifact(istari: IstariClient, model_id: str) -> ArtifactInfo:
 
 def _stage_text_model(
     istari: IstariClient, model_id: str, *, display_name: str,
+    do_custom_extraction: bool = False,
+    revision_id: str | None = None,
     log: "LogCallback | None" = None,
 ) -> ModelInfo:
     """Register the extracted text as its own standalone Model so an LLM job
@@ -386,7 +394,47 @@ def _stage_text_model(
     model showing a 0-byte revision — so the failure is not "artifact vs
     model": either the text we read here was already empty, or the upload
     pipeline drops content even for a genuine model. ``len(text)`` is logged
-    so the next live run tells us which."""
+    so the next live run tells us which.
+
+    ``do_custom_extraction`` (DO_CUSTOM_EXTRACTION) skips Istari's own
+    @istari:extract job/text.txt artifact entirely and extracts locally via
+    pdfplumber instead (pdf_extraction.py) — ``revision_id`` must then be the
+    RFI/response revision to read the source PDF bytes from."""
+    if do_custom_extraction:
+        from .istari_adapter import EXTRACT_TEXT_ARTIFACT
+
+        if revision_id is None:
+            raise PipelineError(
+                "custom extraction requires a revision id to read the source PDF from"
+            )
+        pdf_bytes = istari.read_revision_bytes(revision_id)
+        text = pdf_extraction.extract_text(pdf_bytes)
+        _log(
+            log,
+            f"custom extraction (pdfplumber) of revision {revision_id}: "
+            f"{len(text)} chars"
+            + (f" (preview: {text[:120]!r})" if text else " — EMPTY"),
+        )
+        # Mirror Istari's own @istari:extract job: record the extracted text
+        # as a text.txt artifact on the source model first (provenance
+        # parity — a model looks the same in the platform whether extraction
+        # ran as a real job or locally), then stage it exactly like that path.
+        text_artifact = istari.upload_text_artifact(
+            model_id, EXTRACT_TEXT_ARTIFACT, text,
+            source_revision_id=revision_id,
+            description="Locally-extracted text (pdfplumber, DO_CUSTOM_EXTRACTION).",
+        )
+        _log(
+            log,
+            f"uploaded custom-extracted text as artifact {text_artifact.artifact_id} "
+            f"({EXTRACT_TEXT_ARTIFACT}) on model {model_id}",
+        )
+        text_model = istari.register_text_model(
+            text, display_name=display_name, source_revision_id=text_artifact.revision_id,
+        )
+        _log(log, f"staged custom-extracted text as model {text_model.model_id}")
+        return text_model
+
     from .istari_adapter import EXTRACT_TEXT_ARTIFACT
 
     text_artifact = _find_text_artifact(istari, model_id)
@@ -472,6 +520,8 @@ def run_llm_job_validated(
     *,
     output_artifact: str,
     extra_parameters: dict[str, Any] | None = None,
+    do_custom_extraction: bool = False,
+    revision_id: str | None = None,
     poll_interval_s: float = 3.0,
     job_timeout_s: float = 900.0,
     progress: ProgressCallback | None = None,
@@ -489,7 +539,8 @@ def run_llm_job_validated(
     persisted state machine instead so every step checkpoints.
     """
     text_model = _stage_text_model(
-        istari, model_id, display_name=f"extracted-text-{model_id}", log=log,
+        istari, model_id, display_name=f"extracted-text-{model_id}",
+        do_custom_extraction=do_custom_extraction, revision_id=revision_id, log=log,
     )
     errors: list[str] | None = None
     result = ValidationResult()
@@ -580,41 +631,49 @@ class Stage1Result:
     raw_llm_output: str
     llm_model: str
 
-
 def run_stage1_extraction(
     istari: IstariClient,
     llm_config: LLMJobConfig,
     rfi_uuid: str,
     *,
     revision_id: str | None = None,
+    do_custom_extraction: bool = False,
     poll_interval_s: float = 3.0,
     job_timeout_s: float = 900.0,
     progress: ProgressCallback | None = None,
     log: "LogCallback | None" = None,
 ) -> Stage1Result:
-    """Stage 1 up to (not including) commit: run Istari's PDF extraction on
-    the RFI, then the extract_rfi_requirements LLM job on the extracted-text
-    artifact, and validate the raw output into Requirements client-side.
-    Raises PipelineError with the reason on any failure (FR10)."""
+    """Stage 1 up to (not including) commit: extract text from the RFI PDF,
+    then the extract_rfi_requirements LLM job on the extracted-text artifact,
+    and validate the raw output into Requirements client-side. Raises
+    PipelineError with the reason on any failure (FR10).
+
+    ``do_custom_extraction`` (DO_CUSTOM_EXTRACTION) extracts locally via
+    pdfplumber instead of submitting Istari's own @istari:extract job."""
     _notify(progress, "queued", f"fetching RFI {rfi_uuid}")
     rfi = istari.get_model_info(rfi_uuid)
     if revision_id is not None and revision_id not in rfi.revision_ids:
         raise PipelineError(f"revision {revision_id} not found on RFI {rfi_uuid}")
     rfi_revision_id = revision_id or rfi.latest_revision_id
 
-    _notify(progress, "extracting", "submitting extraction job")
-    job_id = istari.submit_extraction_job(rfi_uuid)
-    _log(log, f"extraction job submitted: job_id={job_id} model_id={rfi_uuid}")
-    wait_for_job(
-        istari, job_id,
-        poll_interval_s=poll_interval_s, timeout_s=job_timeout_s, progress=progress,
-    )
+    if do_custom_extraction:
+        _notify(progress, "extracting", "extracting text locally (pdfplumber)")
+        _log(log, f"custom extraction enabled — skipping Istari extraction job for {rfi_uuid}")
+    else:
+        _notify(progress, "extracting", "submitting extraction job")
+        job_id = istari.submit_extraction_job(rfi_uuid)
+        _log(log, f"extraction job submitted: job_id={job_id} model_id={rfi_uuid}")
+        wait_for_job(
+            istari, job_id,
+            poll_interval_s=poll_interval_s, timeout_s=job_timeout_s, progress=progress,
+        )
 
     result, raw = run_llm_job_validated(
         istari, rfi_uuid, LLM_FUNCTION_EXTRACT_RFI, llm_config,
         validate_requirements,
         output_artifact=LLM_RFI_OUTPUT_ARTIFACT,
         extra_parameters={"rfi_uuid": rfi_uuid, "rfi_rev": rfi_revision_id},
+        do_custom_extraction=do_custom_extraction, revision_id=rfi_revision_id,
         poll_interval_s=poll_interval_s, job_timeout_s=job_timeout_s,
         progress=progress, log=log,
     )
@@ -817,6 +876,7 @@ def process_response(
     requirements_artifact: RequirementsArtifact,
     *,
     force: bool = False,
+    do_custom_extraction: bool = False,
     poll_interval_s: float = 3.0,
     job_timeout_s: float = 900.0,
     progress: ProgressCallback | None = None,
@@ -827,6 +887,13 @@ def process_response(
     continues from the record's persisted state and checkpoints evidence.
     The post-LLM checkpoint is the LLM job's raw-output artifact on the
     platform; the retry-once counter (llm_attempts) is persisted.
+
+    ``do_custom_extraction`` (DO_CUSTOM_EXTRACTION) still passes through
+    JOB_SUBMITTED (so the state machine's legal edges are untouched and
+    resume behavior is unchanged) but never submits or waits on an Istari
+    extraction job — record.job_id stays None and text comes from a local
+    pdfplumber pass instead. Resuming a record must use the same flag value
+    it started with, the same as any other persisted checkpoint evidence.
 
     ``record`` must already be in ``project.responses``. Raises nothing on
     pipeline failures — the record ends FAILED with ``record.error`` set;
@@ -869,12 +936,22 @@ def process_response(
                                   f"{info_art.artifact_id} matches — skipped (FR5)")
                         _notify(progress, "done", "loaded existing answers")
                         return record
-                record.job_id = istari.submit_extraction_job(record.uuid)
-                record.transition(PipelineState.JOB_SUBMITTED)
-                save_project(project, project_path)
-                _log(log, f"response {record.uuid}: extraction job {record.job_id}")
+                if do_custom_extraction:
+                    record.transition(PipelineState.JOB_SUBMITTED)
+                    save_project(project, project_path)
+                    _log(log, f"response {record.uuid}: custom extraction enabled — "
+                              "skipping Istari extraction job")
+                else:
+                    record.job_id = istari.submit_extraction_job(record.uuid)
+                    record.transition(PipelineState.JOB_SUBMITTED)
+                    save_project(project, project_path)
+                    _log(log, f"response {record.uuid}: extraction job {record.job_id}")
 
             elif record.state is PipelineState.JOB_SUBMITTED:
+                if do_custom_extraction:  # no Istari job was ever submitted
+                    record.transition(PipelineState.TEXT_RETRIEVED)
+                    save_project(project, project_path)
+                    continue
                 if record.job_id is None:  # corrupt/hand-edited evidence (FR11)
                     _restart_from_queued(record, project, project_path,
                                          "no extraction job id persisted", log,
@@ -898,6 +975,7 @@ def process_response(
                 _notify(progress, "llm", record.uuid)
                 text_model = _stage_text_model(
                     istari, record.uuid, display_name=f"extracted-text-{record.uuid}",
+                    do_custom_extraction=do_custom_extraction, revision_id=record.revision,
                     log=log,
                 )
                 record.llm_input_model_id = text_model.model_id

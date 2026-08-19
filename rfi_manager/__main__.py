@@ -23,14 +23,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    from .config import AppConfig, ConfigError, IstariConfig, LLMConfig, load_config
+    from .config import (
+        AppConfig,
+        ConfigError,
+        IstariConfig,
+        LLMConfig,
+        custom_extraction_enabled,
+        load_config,
+    )
 
     try:
         config = load_config(args.config, require_token=False)
     except ConfigError as e:
         # no config file is fine — the UI collects the connection details
         print(f"note: {e} — starting with built-in defaults", file=sys.stderr)
-        config = AppConfig(istari=IstariConfig(base_url="", token=""), llm=LLMConfig())
+        config = AppConfig(
+            istari=IstariConfig(base_url="", token=""),
+            llm=LLMConfig(),
+            do_custom_extraction=custom_extraction_enabled(),
+        )
 
     from PySide6.QtWidgets import QApplication
 
@@ -47,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         job_timeout_s=config.istari.job_timeout_s,
         request_timeout_s=config.istari.request_timeout_s,
         retries=config.istari.retries,
+        do_custom_extraction=config.do_custom_extraction,
     )
     window.show()
     return app.exec()

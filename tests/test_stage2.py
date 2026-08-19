@@ -141,6 +141,34 @@ def test_stage2_end_to_end_provenance(tmp_path: Path):
     assert art.answers[0].value == "Compliant"
 
 
+def test_stage2_custom_extraction_skips_istari_extraction_job(tmp_path: Path, monkeypatch):
+    istari, project, req_artifact, response, path = make_setup(tmp_path)
+    istari.revision_bytes[response.latest_revision_id] = b"%PDF-fake-response%"
+    monkeypatch.setattr(
+        "rfi_manager.pipeline.pdf_extraction.extract_text",
+        lambda pdf_bytes: f"extracted:{pdf_bytes.decode()}",
+    )
+
+    record = run_one(
+        istari, project, req_artifact, response, path, do_custom_extraction=True,
+    )
+
+    assert record.state is PipelineState.DONE
+    assert record.job_id is None  # no Istari extraction job was ever submitted
+
+    # provenance parity: a text.txt artifact still lands on the response
+    # model, same as a real extraction job would
+    text_artifact = istari.find_artifact(response.model_id, "text.txt")
+    assert text_artifact is not None
+    [upload_call] = [c for c in istari.upload_calls if c["name"] == "text.txt"]
+    assert upload_call["payload"] == "extracted:%PDF-fake-response%"
+    assert upload_call["source_revision_id"] == response.latest_revision_id
+
+    [register_call] = istari.register_text_model_calls
+    assert register_call["text"] == "extracted:%PDF-fake-response%"
+    assert register_call["source_revision_id"] == text_artifact.revision_id
+
+
 def test_prompt_version_stamp_changes_with_schema():
     assert response_prompt_version("1.0") != response_prompt_version("1.1")
 

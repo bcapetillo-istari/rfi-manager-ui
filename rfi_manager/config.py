@@ -20,6 +20,18 @@ ENV_ISTARI_TOKEN = "ISTARI_TOKEN"
 ENV_ISTARI_BASE_URL = "ISTARI_BASE_URL"
 ENV_LLM_PROVIDER = "RFI_LLM_PROVIDER"
 ENV_LLM_MODEL = "RFI_LLM_MODEL"
+ENV_DO_CUSTOM_EXTRACTION = "DO_CUSTOM_EXTRACTION"
+
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def custom_extraction_enabled() -> bool:
+    """DO_CUSTOM_EXTRACTION feature flag (env-only, unset/false by default):
+    when true, PDF text extraction runs locally via pdfplumber
+    (rfi_manager/pdf_extraction.py) instead of Istari's own @istari:extract
+    job."""
+    load_dotenv()
+    return os.environ.get(ENV_DO_CUSTOM_EXTRACTION, "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
 @dataclass(frozen=True)
@@ -45,6 +57,7 @@ class LLMConfig:
 class AppConfig:
     istari: IstariConfig
     llm: LLMConfig
+    do_custom_extraction: bool = False
 
 
 class ConfigError(Exception):
@@ -107,4 +120,5 @@ def load_config(
             provider=os.environ.get(ENV_LLM_PROVIDER) or llm_raw.get("provider"),
             model=os.environ.get(ENV_LLM_MODEL) or llm_raw.get("model"),
         ),
+        do_custom_extraction=custom_extraction_enabled(),
     )
