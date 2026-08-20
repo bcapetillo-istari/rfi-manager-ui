@@ -16,7 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from rfi_manager.models import PipelineState
 from rfi_manager.persistence import load_project, save_project
@@ -216,17 +216,17 @@ def main() -> None:
         assert w.called, "should warn when no credentials selected"
     print("8. missing-credentials guard: OK")
 
-    # ---- 9. FR8 CSV export from the comparison page
-    export_path = Path(tempfile.mkdtemp()) / "export.csv"
-    with mock.patch.object(
-        QFileDialog, "getSaveFileName", return_value=(str(export_path), "")
-    ):
-        win3.comparison_page.export_button.click()
-    assert export_path.exists(), "export button should write a CSV file"
-    csv_text = export_path.read_text(encoding="utf-8")
-    assert "Vendor" in csv_text.splitlines()[0]
-    assert len(csv_text.splitlines()) == 3  # header + 2 responses
-    print("9. FR8 CSV export from comparison page: OK")
+    # ---- 9. FR8 Commit/Observe in Istari from the comparison page
+    uploads_before = len(istari.upload_calls)
+    win3.comparison_page.commit_button.click()
+    pump(app, lambda: len(istari.upload_calls) == uploads_before + 3, "commit uploads")
+    committed = istari.upload_calls[uploads_before:]
+    names = {c["name"] for c in committed}
+    assert names == {"answers.csv", "answers_tidy.json", "review.html"}, names
+    assert all(c["model_id"] == win3.project.rfi_uuid for c in committed)
+    tidy_payload = next(c["payload"] for c in committed if c["name"] == "answers_tidy.json")
+    assert len(tidy_payload["rows"]) == 4  # 2 responses x 2 requirements
+    print("9. FR8 commit/observe uploads answers.csv + answers_tidy.json + review.html: OK")
 
     print("ALL EXTENDED UI CHECKS PASSED")
 

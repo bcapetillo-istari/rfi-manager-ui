@@ -52,7 +52,9 @@ class ComparisonModel(QAbstractTableModel):
         self._requirements: list[Requirement] = []
         self._rows: list[ComparisonRow] = []
 
-    def set_data(self, requirements: list[Requirement], rows: list[ComparisonRow]) -> None:
+    def set_data(
+        self, requirements: list[Requirement], rows: list[ComparisonRow]
+    ) -> None:
         self.beginResetModel()
         self._requirements = requirements
         self._rows = rows
@@ -70,7 +72,10 @@ class ComparisonModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self._requirements) + 3
 
     def headerData(self, section: int, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if role != Qt.ItemDataRole.DisplayRole or orientation != Qt.Orientation.Horizontal:
+        if (
+            role != Qt.ItemDataRole.DisplayRole
+            or orientation != Qt.Orientation.Horizontal
+        ):
             return None
         if section == 0:
             return "Vendor"
@@ -91,8 +96,12 @@ class ComparisonModel(QAbstractTableModel):
                 cell = row.cells[self._requirements[col - 1].id]
                 if role == Qt.ItemDataRole.UserRole:
                     # numeric-aware sort key
-                    value = cell.value if isinstance(cell.value, (int, float)) \
-                        and not isinstance(cell.value, bool) else cell.display()
+                    value = (
+                        cell.value
+                        if isinstance(cell.value, (int, float))
+                        and not isinstance(cell.value, bool)
+                        else cell.display()
+                    )
                 else:
                     value = cell.display()
             elif col == n_reqs + 1:
@@ -170,7 +179,7 @@ class ComparisonProxy(QSortFilterProxyModel):
 
 class ComparisonPage(QWidget):
     refresh_requested = Signal()
-    export_csv_requested = Signal()
+    commit_observations_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -192,9 +201,9 @@ class ComparisonPage(QWidget):
         self.filter_combo.addItems(FILTERS)
         controls.addWidget(self.filter_combo)
         controls.addStretch(1)
-        self.export_button = QPushButton("Export CSV…")
-        self.export_button.clicked.connect(self.export_csv_requested.emit)
-        controls.addWidget(self.export_button)
+        self.commit_button = QPushButton("Commit to Istari")
+        self.commit_button.clicked.connect(self.commit_observations_requested.emit)
+        controls.addWidget(self.commit_button)
         layout.addLayout(controls)
 
         self.model = ComparisonModel()
@@ -223,7 +232,7 @@ class ComparisonPage(QWidget):
 
         self._requirements: list[Requirement] = []
         self._rows: list[ComparisonRow] = []
-        self.export_button.setEnabled(False)
+        self.commit_button.setEnabled(False)
 
     def load(self, requirements: list[Requirement], rows: list[ComparisonRow]) -> None:
         self._requirements = requirements
@@ -233,7 +242,7 @@ class ComparisonPage(QWidget):
         # a model reset clears the selection without a selectionChanged
         # signal — drop the previous data set's detail pane too (FR7)
         self.detail.clear()
-        self.export_button.setEnabled(bool(rows))
+        self.commit_button.setEnabled(bool(rows))
 
     def current_data(self) -> tuple[list[Requirement], list[ComparisonRow]]:
         """The exact (requirements, rows) currently on screen — used by the

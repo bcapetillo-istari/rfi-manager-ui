@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from .. import pipeline
 from ..config import IstariConfig
-from ..file_export import export_comparison_csv
+from ..file_export import build_comparison_csv, build_html_report, build_tidy_answers_json, upload_exports
 from ..istari_adapter import (
     CredentialInfo,
     CredentialSelection,
@@ -222,7 +222,9 @@ class MainWindow(QMainWindow):
         self.review_screen.commit_requested.connect(self.start_commit)
         self.stage2_page.ingest_requested.connect(self.start_ingest)
         self.stage2_page.retry_requested.connect(self.retry_response)
-        self.comparison_page.export_csv_requested.connect(self._on_export_csv_requested)
+        self.comparison_page.commit_observations_requested.connect(
+            self._on_commit_observations_requested
+        )
 
         if self._istari is not None:  # injected adapter (tests/fakes)
             self.refresh_credentials()
@@ -701,23 +703,41 @@ class MainWindow(QMainWindow):
         if rows:
             self._stack.setCurrentWidget(self.comparison_page)
 
-    def _on_export_csv_requested(self) -> None:
+    def _on_commit_observations_requested(self) -> None:
+        """Build the three export artifacts (answers.csv, answers_tidy.json,
+        review.html) from exactly what's on screen and upload them to the
+        RFI model — a real Istari call, so it runs on a Worker like every
+        other adapter/pipeline operation."""
+        if self.project is None:
+            return
+        istari = self._require_connection()
+        if istari is None:
+            return
         requirements, rows = self.comparison_page.current_data()
         if not rows:
-            QMessageBox.warning(self, "Nothing to export", "The comparison table is empty.")
+            QMessageBox.warning(self, "Nothing to commit", "The comparison table is empty.")
             return
-        default_name = f"{self.project.rfi_uuid}-comparison.csv" if self.project else "comparison.csv"
-        chosen, _filter = QFileDialog.getSaveFileName(
-            self, "Export comparison to CSV", default_name, "CSV (*.csv)"
+        rfi_uuid = self.project.rfi_uuid
+
+        def commit():
+            exports = [
+                build_comparison_csv(requirements, rows),
+                build_tidy_answers_json(requirements, rows),
+                build_html_report(requirements, rows),
+            ]
+            upload_exports(istari, rfi_uuid, exports)
+            return exports
+
+        worker = Worker(commit)
+        worker.signals.finished.connect(self._on_observations_committed)
+        worker.signals.failed.connect(
+            lambda reason: QMessageBox.critical(self, "Commit failed", reason)
         )
-        if not chosen:
-            return
-        try:
-            export_comparison_csv(requirements, rows, chosen)
-        except OSError as e:
-            QMessageBox.critical(self, "Export failed", str(e))
-            return
-        self.log(f"exported comparison table ({len(rows)} responses) to {chosen}")
+        self._spawn(worker)
+
+    def _on_observations_committed(self, exports: list) -> None:
+        names = ", ".join(item.name.value for item in exports)
+        self.log(f"committed observations to RFI {self.project.rfi_uuid}: {names}")
 
     # ------------------------------------------------- open project (FR11)
 
