@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSplitter,
     QTableView,
     QTextEdit,
@@ -169,6 +170,7 @@ class ComparisonProxy(QSortFilterProxyModel):
 
 class ComparisonPage(QWidget):
     refresh_requested = Signal()
+    export_csv_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -189,6 +191,10 @@ class ComparisonPage(QWidget):
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(FILTERS)
         controls.addWidget(self.filter_combo)
+        controls.addStretch(1)
+        self.export_button = QPushButton("Export CSV…")
+        self.export_button.clicked.connect(self.export_csv_requested.emit)
+        controls.addWidget(self.export_button)
         layout.addLayout(controls)
 
         self.model = ComparisonModel()
@@ -216,14 +222,23 @@ class ComparisonPage(QWidget):
         self.table.selectionModel().selectionChanged.connect(self._on_selection)
 
         self._requirements: list[Requirement] = []
+        self._rows: list[ComparisonRow] = []
+        self.export_button.setEnabled(False)
 
-    def load(self, requirements: list[Requirement], rows) -> None:
+    def load(self, requirements: list[Requirement], rows: list[ComparisonRow]) -> None:
         self._requirements = requirements
+        self._rows = rows
         self.model.set_data(requirements, rows)
         self.table.resizeColumnsToContents()
         # a model reset clears the selection without a selectionChanged
         # signal — drop the previous data set's detail pane too (FR7)
         self.detail.clear()
+        self.export_button.setEnabled(bool(rows))
+
+    def current_data(self) -> tuple[list[Requirement], list[ComparisonRow]]:
+        """The exact (requirements, rows) currently on screen — used by the
+        CSV export so it matches what's rendered, not a re-fetch."""
+        return self._requirements, self._rows
 
     # FR7: detail pane with copyable provenance UUIDs
     def _on_selection(self) -> None:

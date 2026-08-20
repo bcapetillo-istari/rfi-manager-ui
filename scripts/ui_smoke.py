@@ -16,7 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from rfi_manager.models import PipelineState
 from rfi_manager.persistence import load_project, save_project
@@ -215,6 +215,18 @@ def main() -> None:
         app.processEvents()
         assert w.called, "should warn when no credentials selected"
     print("8. missing-credentials guard: OK")
+
+    # ---- 9. FR8 CSV export from the comparison page
+    export_path = Path(tempfile.mkdtemp()) / "export.csv"
+    with mock.patch.object(
+        QFileDialog, "getSaveFileName", return_value=(str(export_path), "")
+    ):
+        win3.comparison_page.export_button.click()
+    assert export_path.exists(), "export button should write a CSV file"
+    csv_text = export_path.read_text(encoding="utf-8")
+    assert "Vendor" in csv_text.splitlines()[0]
+    assert len(csv_text.splitlines()) == 3  # header + 2 responses
+    print("9. FR8 CSV export from comparison page: OK")
 
     print("ALL EXTENDED UI CHECKS PASSED")
 

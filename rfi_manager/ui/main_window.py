@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from .. import pipeline
 from ..config import IstariConfig
+from ..file_export import export_comparison_csv
 from ..istari_adapter import (
     CredentialInfo,
     CredentialSelection,
@@ -221,6 +222,7 @@ class MainWindow(QMainWindow):
         self.review_screen.commit_requested.connect(self.start_commit)
         self.stage2_page.ingest_requested.connect(self.start_ingest)
         self.stage2_page.retry_requested.connect(self.retry_response)
+        self.comparison_page.export_csv_requested.connect(self._on_export_csv_requested)
 
         if self._istari is not None:  # injected adapter (tests/fakes)
             self.refresh_credentials()
@@ -698,6 +700,24 @@ class MainWindow(QMainWindow):
         self.log(f"comparison table: {len(rows)} responses")
         if rows:
             self._stack.setCurrentWidget(self.comparison_page)
+
+    def _on_export_csv_requested(self) -> None:
+        requirements, rows = self.comparison_page.current_data()
+        if not rows:
+            QMessageBox.warning(self, "Nothing to export", "The comparison table is empty.")
+            return
+        default_name = f"{self.project.rfi_uuid}-comparison.csv" if self.project else "comparison.csv"
+        chosen, _filter = QFileDialog.getSaveFileName(
+            self, "Export comparison to CSV", default_name, "CSV (*.csv)"
+        )
+        if not chosen:
+            return
+        try:
+            export_comparison_csv(requirements, rows, chosen)
+        except OSError as e:
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+        self.log(f"exported comparison table ({len(rows)} responses) to {chosen}")
 
     # ------------------------------------------------- open project (FR11)
 
