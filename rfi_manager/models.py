@@ -18,7 +18,7 @@ CONFIDENCE_LEVELS = ("high", "medium", "low", "none")
 
 NOT_FOUND = "NOT_FOUND"
 
-# T/O validation (PRD §4, docs/T-O_VALIDATION.md)
+# T/O compliance (PRD §4, docs/T-O_COMPLIANCE.md)
 DIRECTIONS = ("at_least", "at_most")
 GRADE_CATEGORIES = (
     "BELOW_THRESHOLD",
@@ -98,7 +98,7 @@ def can_transition(current: PipelineState, new: PipelineState) -> bool:
 class Requirement:
     """One extracted RFI requirement (PRD §4, Stage 1 output).
 
-    The T/O validation fields (docs/T-O_VALIDATION.md) are all optional:
+    The T/O compliance fields (docs/T-O_COMPLIANCE.md) are all optional:
     artifacts that predate T/O extraction parse cleanly with ``gradeable``
     False. ``gradeable`` is an explicit extractor judgment, never derived
     from T/O presence — the example RFI has informational "(T=O)" rows."""
@@ -202,8 +202,8 @@ class Answer:
     quote: str = ""  # may be "" when NOT_FOUND
     page: int | None = None
     confidence: str = "none"  # one of CONFIDENCE_LEVELS
-    # T/O validation (docs/T-O_VALIDATION.md): LLM-graded text types only —
-    # deterministic grades never live here, only in the validation report.
+    # T/O compliance (docs/T-O_COMPLIANCE.md): LLM-graded text types only —
+    # deterministic grades never live here, only in the compliance report.
     llm_grade: str | None = None  # one of GRADE_CATEGORIES
     llm_grade_rationale: str | None = None
 

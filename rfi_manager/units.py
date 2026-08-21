@@ -1,4 +1,4 @@
-"""Deterministic unit conversion for T/O grading (docs/T-O_VALIDATION.md).
+"""Deterministic unit conversion for T/O grading (docs/T-O_COMPLIANCE.md).
 
 A ``{family: {canonical_unit: factor}}`` table plus an alias-normalization
 layer — the hard part is aliases ("KTAS", "hrs", "ft MSL"), not arithmetic.

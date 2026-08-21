@@ -112,7 +112,7 @@ Requirement (Stage 1 output, list of):
     "unit": "kg" | null,           # numeric only
     "options": ["Compliant", ...] | null,   # enum only
     "required": true | false,
-    # T/O validation fields (docs/T-O_VALIDATION.md) — all optional/nullable;
+    # T/O compliance fields (docs/T-O_COMPLIANCE.md) — all optional/nullable;
     # absent fields mean the requirement predates T/O extraction (gradeable
     # defaults false). T and O are normalized into `unit` by the extractor.
     "threshold": <number|bool|null>,        # T value
@@ -134,10 +134,10 @@ Answer (Stage 2 output, list of):
     "quote": "<verbatim supporting sentence>",   # may be "" when NOT_FOUND
     "page": <int|null>,
     "confidence": "high" | "medium" | "low" | "none",
-    # T/O validation fields (docs/T-O_VALIDATION.md) — optional/nullable.
+    # T/O compliance fields (docs/T-O_COMPLIANCE.md) — optional/nullable.
     # Populated by the LLM for text-type gradeable requirements ONLY;
     # numeric/enum/boolean grading is deterministic client-side and lives in
-    # the validation report artifacts, never here.
+    # the compliance report artifacts, never here.
     "llm_grade": "BELOW_THRESHOLD" | "MEETS_THRESHOLD" | "MEETS_OBJECTIVE"
                  | "NOT_GRADEABLE" | "NOT_FOUND" | null,
     "llm_grade_rationale": "<one line citing the quote>" | null }
@@ -164,7 +164,7 @@ gradeable=true requires T or O present for the requirement's type. Missing
 T/O fields are legal everywhere (backcompat: parse cleanly, gradeable
 defaults false). Answers: llm_grade must be one of the five grade categories
 when set; llm_grade on a non-text requirement is a warning (deterministic
-grading wins; see docs/T-O_VALIDATION.md precedence rule).
+grading wins; see docs/T-O_COMPLIANCE.md precedence rule).
 
 ## 5. Functional requirements
 FR1  Stage 1 UI: UUID (+ optional revision) input; "Extract requirements" button;

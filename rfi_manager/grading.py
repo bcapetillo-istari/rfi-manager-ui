@@ -1,4 +1,4 @@
-"""Deterministic T/O grading (docs/T-O_VALIDATION.md). Pure: no Qt, no SDK.
+"""Deterministic T/O grading (docs/T-O_COMPLIANCE.md). Pure: no Qt, no SDK.
 
 Grades are DERIVED, computed at export/report-build time from the on-screen
 comparison data (pipeline.ComparisonCell — which carries what the committed
@@ -83,7 +83,7 @@ def _numeric_grade(value: float, req: Requirement) -> str:
 def _coerce_number(value: Any) -> float | None:
     """Real extracted values arrive as int/float or numeric strings ("212.98",
     "1,150"). Embedded-text blobs and ranges are NOT parsed — deterministic
-    grading refuses to guess (docs/T-O_VALIDATION.md: ranges NOT_GRADEABLE)."""
+    grading refuses to guess (docs/T-O_COMPLIANCE.md: ranges NOT_GRADEABLE)."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -196,7 +196,7 @@ def _grade_enum(req: Requirement, cell: ComparisonCell) -> GradeRecord:
 def grade_cell(req: Requirement, cell: ComparisonCell) -> GradeRecord:
     """Grade one comparison cell per the T/O spec.
 
-    Precedence (docs/T-O_VALIDATION.md): deterministic always wins for
+    Precedence (docs/T-O_COMPLIANCE.md): deterministic always wins for
     numeric/enum/boolean — cell.llm_grade is consulted ONLY for text types,
     even if the LLM emitted one elsewhere."""
     if cell.is_not_found:

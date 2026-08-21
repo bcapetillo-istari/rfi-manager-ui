@@ -217,26 +217,26 @@ def main() -> None:
     print("8. missing-credentials guard: OK")
 
     # ---- 9. FR8 Commit/Observe in Istari from the comparison page
-    # (T/O validation adds validation_report.json/.html — 5 artifacts total)
+    # (T/O compliance adds compliance_report.json/.html — 5 artifacts total)
     uploads_before = len(istari.upload_calls)
     win3.comparison_page.commit_button.click()
     pump(app, lambda: len(istari.upload_calls) == uploads_before + 5, "commit uploads")
     committed = istari.upload_calls[uploads_before:]
     names = {c["name"] for c in committed}
     assert names == {"answers.csv", "answers_tidy.json", "review.html",
-                     "validation_report.json", "validation_report.html"}, names
+                     "compliance_report.json", "compliance_report.html"}, names
     assert all(c["model_id"] == win3.project.rfi_uuid for c in committed)
     tidy_payload = next(c["payload"] for c in committed if c["name"] == "answers_tidy.json")
     assert len(tidy_payload["rows"]) == 4  # 2 responses x 2 requirements
     validation_payload = next(
-        c["payload"] for c in committed if c["name"] == "validation_report.json"
+        c["payload"] for c in committed if c["name"] == "compliance_report.json"
     )
     assert len(validation_payload["rows"]) == 4
     # REQS in this script carry no T/O fields -> everything NOT_GRADEABLE/NOT_FOUND
     assert all(
         r["grade"] in ("NOT_GRADEABLE", "NOT_FOUND") for r in validation_payload["rows"]
     )
-    print("9. FR8 commit uploads 5 artifacts incl. validation reports: OK")
+    print("9. FR8 commit uploads 5 artifacts incl. compliance reports: OK")
 
     # ---- 10. Review screen round-trips T/O fields (no silent data loss)
     from rfi_manager.models import Requirement

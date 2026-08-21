@@ -85,8 +85,8 @@ def test_project_rejects_unknown_format_version():
 
 def test_data_contract_keys_frozen():
     """PRD §4 key names are frozen — a rename here is a spec violation.
-    (T/O validation fields added 2026-08-21 via PRD amendment; see
-    docs/T-O_VALIDATION.md.)"""
+    (T/O compliance fields added 2026-08-21 via PRD amendment; see
+    docs/T-O_COMPLIANCE.md.)"""
     req_keys = set(make_requirements_artifact().requirements[0].to_dict())
     assert req_keys == {
         "id", "label", "description", "type", "unit", "options", "required",

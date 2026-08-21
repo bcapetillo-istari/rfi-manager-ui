@@ -23,7 +23,7 @@ from ..models import DIRECTIONS, REQUIREMENT_TYPES, Requirement
 
 _COLUMNS = [
     "id", "label", "description", "type", "unit", "options", "required",
-    # T/O validation (docs/T-O_VALIDATION.md) — probabilistic extraction must
+    # T/O compliance (docs/T-O_COMPLIANCE.md) — probabilistic extraction must
     # be human-correctable before commit
     "threshold", "objective", "direction", "gradeable",
     "T option", "O option", "T/O raw",
@@ -252,7 +252,7 @@ class ReviewScreen(QWidget):
                 errors.append(f"{where}: enum without options")
             if req.type == "numeric" and not req.unit:
                 warnings.append(f"{where}: numeric without unit")
-            # T/O validation (docs/T-O_VALIDATION.md)
+            # T/O compliance (docs/T-O_COMPLIANCE.md)
             if req.gradeable:
                 if req.type == "numeric" and req.threshold is None and req.objective is None:
                     errors.append(f"{where}: gradeable numeric without threshold/objective")

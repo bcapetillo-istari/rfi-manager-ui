@@ -272,7 +272,7 @@ def test_no_retry_when_first_response_valid():
     assert len(istari.llm_calls) == 1
 
 
-# ------------------------------------------------- T/O fields (PRD §4, T-O_VALIDATION)
+# ------------------------------------------------- T/O fields (PRD §4, T-O_COMPLIANCE)
 
 def test_to_fields_parse_and_roundtrip():
     raw = json.dumps([{

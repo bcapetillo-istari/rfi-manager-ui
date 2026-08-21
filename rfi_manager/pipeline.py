@@ -157,7 +157,7 @@ def _validate_to_fields(
     where: str,
     result: ValidationResult,
 ) -> dict[str, Any]:
-    """Validate the optional T/O fields (PRD §4, docs/T-O_VALIDATION.md).
+    """Validate the optional T/O fields (PRD §4, docs/T-O_COMPLIANCE.md).
 
     All fields are legal to omit (backcompat). Inconsistencies degrade to
     gradeable=False with a warning rather than erroring the whole artifact —
@@ -361,7 +361,7 @@ def validate_answers(raw_llm_output: str, requirements: list[Requirement]) -> Va
         if req.type == "numeric" and value != NOT_FOUND and unit is None:
             unit = req.unit  # answers inherit the requirement's unit
 
-        # T/O validation (PRD §4): llm_grade is for text types only —
+        # T/O compliance (PRD §4): llm_grade is for text types only —
         # deterministic grading wins elsewhere (precedence rule)
         llm_grade = entry.get("llm_grade")
         llm_grade_rationale = entry.get("llm_grade_rationale")
@@ -1363,7 +1363,7 @@ class ComparisonCell:
     quote: str = ""
     page: int | None = None
     confidence: str = "none"
-    # T/O validation (PRD §4): LLM grade for text types, from Answer
+    # T/O compliance (PRD §4): LLM grade for text types, from Answer
     llm_grade: str | None = None
     llm_grade_rationale: str | None = None
 

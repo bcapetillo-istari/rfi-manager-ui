@@ -1,5 +1,5 @@
 """units.py: conversion arithmetic, alias normalization, fail-fast on
-unknown/cross-family conversions (docs/T-O_VALIDATION.md)."""
+unknown/cross-family conversions (docs/T-O_COMPLIANCE.md)."""
 
 from __future__ import annotations
 

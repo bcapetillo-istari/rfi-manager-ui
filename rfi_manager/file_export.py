@@ -38,8 +38,8 @@ class ExportName(Enum):
     COMPARISON_CSV = "answers.csv"
     TIDY_ANSWERS_JSON = "answers_tidy.json"
     REVIEW_HTML = "review.html"
-    VALIDATION_JSON = "validation_report.json"
-    VALIDATION_HTML = "validation_report.html"
+    COMPLIANCE_JSON = "compliance_report.json"
+    COMPLIANCE_HTML = "compliance_report.html"
 
 
 @dataclass
@@ -338,7 +338,7 @@ def _html_document(
     footer_rows: str,
     legend: str = "",
 ) -> str:
-    """Shared HTML shell for the review and validation reports: same style,
+    """Shared HTML shell for the review and compliance reports: same style,
     same sticky-column grid, same hover-overlay script, same provenance
     footer — only the title/meta/legend/cells differ."""
     return f"""<!DOCTYPE html>
@@ -379,7 +379,7 @@ def _html_document(
 """
 
 
-# T/O validation report (docs/T-O_VALIDATION.md): cells color-coded by grade.
+# T/O compliance report (docs/T-O_COMPLIANCE.md): cells color-coded by grade.
 _GRADE_COLOR = {
     "BELOW_THRESHOLD": "#f4b6bc",  # red
     "MEETS_THRESHOLD": "#d4edda",  # light green
@@ -402,7 +402,7 @@ def _grade_records(
     }
 
 
-def build_validation_report_json(
+def build_compliance_report_json(
     requirements: list[Requirement], rows: list[ComparisonRow]
 ) -> ExportItem:
     """Tidy-formatted like answers_tidy.json, plus the grade fields: grade,
@@ -458,10 +458,10 @@ def build_validation_report_json(
         ],
         "rows": tidy,
     }
-    return ExportItem(ExportName.VALIDATION_JSON, payload)
+    return ExportItem(ExportName.COMPLIANCE_JSON, payload)
 
 
-def _validation_cell_td(
+def _compliance_cell_td(
     req: Requirement, row: ComparisonRow, record: "grading.GradeRecord"
 ) -> str:
     cell = row.cells[req.id]
@@ -495,11 +495,11 @@ def _validation_cell_td(
     )
 
 
-def build_validation_report_html(
+def build_compliance_report_html(
     requirements: list[Requirement], rows: list[ComparisonRow]
 ) -> ExportItem:
     """Same grid/overlay as review.html, but cells color-coded by T/O grade
-    (docs/T-O_VALIDATION.md): red / light green / darker green / grey."""
+    (docs/T-O_COMPLIANCE.md): red / light green / darker green / grey."""
     records = _grade_records(requirements, rows)
     generated_at = datetime.now(timezone.utc).isoformat()
 
@@ -510,7 +510,7 @@ def build_validation_report_html(
         "<tr>"
         + _vendor_td(row)
         + "".join(
-            _validation_cell_td(req, row, records[(row.response_uuid, req.id)])
+            _compliance_cell_td(req, row, records[(row.response_uuid, req.id)])
             for req in requirements
         )
         + "</tr>"
@@ -532,7 +532,7 @@ def build_validation_report_html(
     )
 
     html_doc = _html_document(
-        title="RFI T/O Validation Report",
+        title="RFI T/O Compliance Report",
         meta_line=(
             f"Generated {escape(generated_at)} — {len(rows)} response(s), "
             f"{len(requirements)} requirement(s). "
@@ -543,7 +543,7 @@ def build_validation_report_html(
         footer_rows=_provenance_footer_rows(rows),
         legend=legend,
     )
-    return ExportItem(ExportName.VALIDATION_HTML, html_doc)
+    return ExportItem(ExportName.COMPLIANCE_HTML, html_doc)
 
 
 def upload_exports(
@@ -553,12 +553,12 @@ def upload_exports(
         if export.name in (
             ExportName.COMPARISON_CSV,
             ExportName.REVIEW_HTML,
-            ExportName.VALIDATION_HTML,
+            ExportName.COMPLIANCE_HTML,
         ):
             istari.upload_text_artifact(
                 model_id=model_id, name=export.name.value, text=export.data
             )
-        elif export.name in (ExportName.TIDY_ANSWERS_JSON, ExportName.VALIDATION_JSON):
+        elif export.name in (ExportName.TIDY_ANSWERS_JSON, ExportName.COMPLIANCE_JSON):
             istari.upload_json_artifact(
                 model_id=model_id, name=export.name.value, payload=export.data
             )

@@ -1,4 +1,4 @@
-## Feature: T/O Validation for RFI Responses
+## Feature: T/O Compliance for RFI Responses
 
 ### Overview
 AF Acquisition RFIs follow standard T/O grading mechanisms. T (the Threshold) is the minimum value desired for a system attribute/characteristic. O (the Objective) is the desired value for a system attribute/characteristic. T/O values are specified per requirement and exist for most requirements in an RFI, but not necessarily all. Some requirements may be informational and will not specify T/O thresholds. The purpose of this feature is to enable acquisition officers to quickly identify which vendors satisfy these T/O benchmarks without manually cross-referencing proposals.
@@ -42,9 +42,9 @@ Hybrid grading — deterministic where possible, LLM only where necessary, with 
 **Precedence rule (enforced in grading.py, not assumed from the prompt):** if the LLM emits a grade for a numeric/enum/boolean requirement anyway, the deterministic grade always wins. The LLM grade is consulted only where deterministic code cannot compute.
 
 **Where grades and converted values live:**
-- Deterministic grades and converted values exist only in the validation report artifacts, computed at export time. Committed answers artifacts are never mutated or re-uploaded (preserves provenance and FR5 idempotency). Auditability: validation_report.json carries BOTH the original value/unit and the converted value/unit per row.
+- Deterministic grades and converted values exist only in the compliance report artifacts, computed at export time. Committed answers artifacts are never mutated or re-uploaded (preserves provenance and FR5 idempotency). Auditability: compliance_report.json carries BOTH the original value/unit and the converted value/unit per row.
 - LLM text grades ride inside the answers artifacts (produced at ingest time by the Stage 2 job). Consequence: changing a T/O value re-grades deterministic rows at the next export, but text rows keep their old LLM grade until the response is re-ingested — consistent with the existing stale-schema (FR3) flow.
-- The validation report is the single unified view where both grade sources appear together.
+- The compliance report is the single unified view where both grade sources appear together.
 
 **Polarity/direction:** `value >= T` is wrong for lower-is-better requirements (weight, cost, lead time). The requirements schema gains an explicit `direction` field (`"at_least" | "at_most"`), LLM-extracted, cross-checked client-side against T/O ordering when T ≠ O (mismatch → validation warning + gradeable=false), and human-correctable in the Stage 1 review screen. For T=O numeric requirements direction is unknowable from the values alone — the LLM must emit it.
 
@@ -105,7 +105,7 @@ Versioning/backcompat: schema_version bumps via the existing mechanics; old arti
 4. `pipeline.py` / `validate_answers` — accept/validate the optional llm_grade vocabulary and rationale.
 5. New `rfi_manager/units.py` — deterministic unit conversion: a `{family: {alias: factor}}` table (length, time, speed, mass, data rate) plus an alias-normalization layer ("KTAS", "kts", "hrs", "ft MSL", "nmi"/"nautical miles"). Pure, stdlib only — no pint, per the dependency policy. Unknown or cross-family units → NOT_GRADEABLE with reason "unsupported_conversion" — fail fast, never guess.
 6. New `rfi_manager/grading.py` — deterministic grader + precedence logic + grade-record assembly (grade, grade_source, reason, original/converted values). Pure: no Qt, no SDK.
-7. `file_export.py` — `build_validation_report_json` and `build_validation_report_html` builders, new ExportName members, grade color map, upload_exports dispatch.
+7. `file_export.py` — `build_compliance_report_json` and `build_compliance_report_html` builders, new ExportName members, grade color map, upload_exports dispatch.
 8. `ui/main_window.py` — include the two new builders in the Commit-to-Istari worker (5 artifacts total per commit).
 9. `ui/review_screen.py` — display + allow correction of T/O/direction/gradeable before commit (probabilistic extraction must be human-correctable).
 10. Tests — units.py conversion/alias table; grading.py (all five categories, both directions, T=O, T=none, precedence rule, epsilon edges, backcompat with missing fields); export builders (colors, grade_source in tooltip, escaping); fakes + ui_smoke.py scenario for the 5-artifact commit.
@@ -120,8 +120,8 @@ Versioning/backcompat: schema_version bumps via the existing mechanics; old arti
 ### Export Artifacts (following file_export.py conventions)
 
 Two NEW artifacts added to the existing one-click Commit to Istari (5 total); existing artifacts (answers_tidy.json, answers.csv, review.html) unchanged:
-1. `validation_report.json` — tidy-formatted JSON like our existing export, plus per row: grade, grade_source ("deterministic" | "llm"), grade_reason (for NOT_GRADEABLE), original_value, original_unit, converted_value, converted_unit, threshold, objective, direction.
-2. `validation_report.html` — renders basically the same as our current html export (spreadsheet grid, sticky vendor column, hover overlay with provenance + grade + grade_source), with color-coded cells per validation result:
+1. `compliance_report.json` — tidy-formatted JSON like our existing export, plus per row: grade, grade_source ("deterministic" | "llm"), grade_reason (for NOT_GRADEABLE), original_value, original_unit, converted_value, converted_unit, threshold, objective, direction.
+2. `compliance_report.html` — renders basically the same as our current html export (spreadsheet grid, sticky vendor column, hover overlay with provenance + grade + grade_source), with color-coded cells per validation result:
     - BELOW_THRESHOLD = red
     - MEETS_THRESHOLD = light green
     - MEETS_OBJECTIVE = darker green
@@ -130,6 +130,6 @@ Two NEW artifacts added to the existing one-click Commit to Istari (5 total); ex
 ### Rollout Sequencing (client-first, module-second)
 
 1. PRD §4 amendment.
-2. Client release: parses/validates the optional new fields, defaults gradeable=false, grading + validation reports behind that default — deployable with zero module change (reports render all-grey gracefully).
+2. Client release: parses/validates the optional new fields, defaults gradeable=false, grading + compliance reports behind that default — deployable with zero module change (reports render all-grey gracefully).
 3. Module prompt/schema deploy.
-4. Re-run Stage 1 on a live RFI; verify new fields arrive; re-ingest responses; verify text-type llm_grades and the full validation report.
+4. Re-run Stage 1 on a live RFI; verify new fields arrive; re-ingest responses; verify text-type llm_grades and the full compliance report.
