@@ -268,7 +268,7 @@ _HTML_STYLE = """
   .meta { color: #666; font-size: 12px; margin-bottom: 16px; }
   .legend { font-size: 12px; margin-bottom: 10px; }
   .legend span { padding: 2px 10px; margin-right: 8px; border: 1px solid #ccc; }
-  .table-wrap { overflow-x: auto; border: 1px solid #ccc; max-width: 100%; }
+  .table-wrap { overflow-x: auto; border: 1px solid #ccc; max-width: 100%; padding-bottom: 12px; }
   table { border-collapse: collapse; font-size: 13px; white-space: nowrap; }
   th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
   th { background: #f2f2f2; position: sticky; top: 0; z-index: 1; }
@@ -471,7 +471,10 @@ def _validation_cell_td(
         tooltip_lines.append(f"Reason: {record.grade_reason}")
     if record.llm_grade_rationale:
         tooltip_lines.append(f"Rationale: {record.llm_grade_rationale}")
-    if record.converted_value is not None and record.converted_unit != record.original_unit:
+    if (
+        record.converted_value is not None
+        and record.converted_unit != record.original_unit
+    ):
         tooltip_lines.append(
             f"Converted: {record.converted_value:g} {record.converted_unit}"
         )
@@ -513,11 +516,20 @@ def build_validation_report_html(
         + "</tr>"
         for row in rows
     )
-    legend = '<div class="legend">' + "".join(
-        f'<span style="background:{_GRADE_COLOR[grade]}">{grade}</span>'
-        for grade in ("BELOW_THRESHOLD", "MEETS_THRESHOLD", "MEETS_OBJECTIVE",
-                      "NOT_GRADEABLE", "NOT_FOUND")
-    ) + "</div>"
+    legend = (
+        '<div class="legend">'
+        + "".join(
+            f'<span style="background:{_GRADE_COLOR[grade]}">{grade}</span>'
+            for grade in (
+                "BELOW_THRESHOLD",
+                "MEETS_THRESHOLD",
+                "MEETS_OBJECTIVE",
+                "NOT_GRADEABLE",
+                "NOT_FOUND",
+            )
+        )
+        + "</div>"
+    )
 
     html_doc = _html_document(
         title="RFI T/O Validation Report",
