@@ -105,3 +105,76 @@ def test_html_report_escapes_and_tints_by_status():
     assert "&lt;script&gt;" in item.data
     assert 'class="vendor-col"' in item.data  # sticky column present
     assert "Status: Not found" in item.data  # hover tooltip content
+
+
+# ------------------------------------------- T/O validation report artifacts
+
+TO_REQUIREMENTS = [
+    Requirement(id="1.1", label="Range", description="d", type="numeric",
+                unit="km", threshold=200, objective=1500, direction="at_least",
+                gradeable=True),
+    Requirement(id="1.9", label="Comms", description="d", type="text",
+                gradeable=True),
+]
+
+
+def to_row(vendor="Acme", range_value=250, range_unit="km", llm_grade=None):
+    return ComparisonRow(
+        vendor=vendor, response_uuid="resp-1", response_revision="rev-1",
+        answers_artifact_uuid="art-1", schema_version="1.1", stale=False,
+        cells={
+            "1.1": ComparisonCell(value=range_value, unit=range_unit,
+                                   quote="Range is stated.", page=2,
+                                   confidence="high"),
+            "1.9": ComparisonCell(value="Secure BLOS with FMV", confidence="medium",
+                                   quote="We provide BLOS SATCOM.", page=4,
+                                   llm_grade=llm_grade,
+                                   llm_grade_rationale="BLOS meets O." if llm_grade else None),
+        },
+    )
+
+
+def test_validation_report_json_grades_and_provenance():
+    from rfi_manager.file_export import build_validation_report_json
+
+    item = build_validation_report_json(TO_REQUIREMENTS, [to_row(llm_grade="MEETS_OBJECTIVE")])
+
+    assert item.name is ExportName.VALIDATION_JSON
+    rows = item.data["rows"]
+    assert len(rows) == 2
+
+    numeric = next(r for r in rows if r["requirement_id"] == "1.1")
+    assert numeric["grade"] == "MEETS_THRESHOLD"  # 250 km: >= T, < O
+    assert numeric["grade_source"] == "deterministic"
+    assert numeric["threshold"] == 200 and numeric["objective"] == 1500
+
+    text = next(r for r in rows if r["requirement_id"] == "1.9")
+    assert text["grade"] == "MEETS_OBJECTIVE"
+    assert text["grade_source"] == "llm"
+    assert text["llm_grade_rationale"] == "BLOS meets O."
+
+
+def test_validation_report_json_conversion_audit_trail():
+    from rfi_manager.file_export import build_validation_report_json
+
+    item = build_validation_report_json(TO_REQUIREMENTS, [to_row(range_value=120, range_unit="nmi")])
+    numeric = next(r for r in item.data["rows"] if r["requirement_id"] == "1.1")
+    assert numeric["original_value"] == 120
+    assert numeric["original_unit"] == "nmi"
+    assert round(numeric["converted_value"], 2) == 222.24
+    assert numeric["converted_unit"] == "km"
+    assert numeric["grade"] == "MEETS_THRESHOLD"
+
+
+def test_validation_report_html_colors_by_grade():
+    from rfi_manager.file_export import build_validation_report_html, _GRADE_COLOR
+
+    item = build_validation_report_html(
+        TO_REQUIREMENTS, [to_row(range_value=100)]  # 100 km < T=200
+    )
+    assert item.name is ExportName.VALIDATION_HTML
+    assert _GRADE_COLOR["BELOW_THRESHOLD"] in item.data
+    assert "Grade: BELOW_THRESHOLD (deterministic)" in item.data
+    # text cell had no llm_grade -> grey NOT_GRADEABLE
+    assert "Grade: NOT_GRADEABLE" in item.data
+    assert "legend" in item.data

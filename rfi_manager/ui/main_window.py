@@ -30,7 +30,14 @@ from PySide6.QtWidgets import (
 
 from .. import pipeline
 from ..config import IstariConfig
-from ..file_export import build_comparison_csv, build_html_report, build_tidy_answers_json, upload_exports
+from ..file_export import (
+    build_comparison_csv,
+    build_html_report,
+    build_tidy_answers_json,
+    build_validation_report_html,
+    build_validation_report_json,
+    upload_exports,
+)
 from ..istari_adapter import (
     CredentialInfo,
     CredentialSelection,
@@ -724,6 +731,8 @@ class MainWindow(QMainWindow):
                 build_comparison_csv(requirements, rows),
                 build_tidy_answers_json(requirements, rows),
                 build_html_report(requirements, rows),
+                build_validation_report_json(requirements, rows),
+                build_validation_report_html(requirements, rows),
             ]
             upload_exports(istari, rfi_uuid, exports)
             return exports

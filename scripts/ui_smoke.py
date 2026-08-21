@@ -217,16 +217,48 @@ def main() -> None:
     print("8. missing-credentials guard: OK")
 
     # ---- 9. FR8 Commit/Observe in Istari from the comparison page
+    # (T/O validation adds validation_report.json/.html — 5 artifacts total)
     uploads_before = len(istari.upload_calls)
     win3.comparison_page.commit_button.click()
-    pump(app, lambda: len(istari.upload_calls) == uploads_before + 3, "commit uploads")
+    pump(app, lambda: len(istari.upload_calls) == uploads_before + 5, "commit uploads")
     committed = istari.upload_calls[uploads_before:]
     names = {c["name"] for c in committed}
-    assert names == {"answers.csv", "answers_tidy.json", "review.html"}, names
+    assert names == {"answers.csv", "answers_tidy.json", "review.html",
+                     "validation_report.json", "validation_report.html"}, names
     assert all(c["model_id"] == win3.project.rfi_uuid for c in committed)
     tidy_payload = next(c["payload"] for c in committed if c["name"] == "answers_tidy.json")
     assert len(tidy_payload["rows"]) == 4  # 2 responses x 2 requirements
-    print("9. FR8 commit/observe uploads answers.csv + answers_tidy.json + review.html: OK")
+    validation_payload = next(
+        c["payload"] for c in committed if c["name"] == "validation_report.json"
+    )
+    assert len(validation_payload["rows"]) == 4
+    # REQS in this script carry no T/O fields -> everything NOT_GRADEABLE/NOT_FOUND
+    assert all(
+        r["grade"] in ("NOT_GRADEABLE", "NOT_FOUND") for r in validation_payload["rows"]
+    )
+    print("9. FR8 commit uploads 5 artifacts incl. validation reports: OK")
+
+    # ---- 10. Review screen round-trips T/O fields (no silent data loss)
+    from rfi_manager.models import Requirement
+    from rfi_manager.ui.review_screen import ReviewScreen
+
+    screen = ReviewScreen()
+    to_reqs = [
+        Requirement(id="1.1", label="Range", description="Range req", type="numeric",
+                    unit="km", threshold=200, objective=1500, direction="at_least",
+                    gradeable=True, to_raw="T=200km/O=1500km"),
+        Requirement(id="C-01", label="MOSA", description="d", type="enum",
+                    options=["Non-Compliant", "Partial", "Compliant"],
+                    threshold_option="Partial", objective_option="Compliant",
+                    gradeable=True),
+        Requirement(id="KSA-1", label="IFF", description="d", type="boolean",
+                    threshold=True, objective=True, gradeable=True),
+    ]
+    screen.load(to_reqs, "1.1")
+    assert screen.requirements() == to_reqs, "review screen dropped T/O fields"
+    errors, _warnings = screen.validate()
+    assert not errors, errors
+    print("10. review screen T/O round-trip without data loss: OK")
 
     print("ALL EXTENDED UI CHECKS PASSED")
 

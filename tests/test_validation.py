@@ -270,3 +270,108 @@ def test_no_retry_when_first_response_valid():
     result, _raw = run_job(istari, model.model_id)
     assert result.ok
     assert len(istari.llm_calls) == 1
+
+
+# ------------------------------------------------- T/O fields (PRD §4, T-O_VALIDATION)
+
+def test_to_fields_parse_and_roundtrip():
+    raw = json.dumps([{
+        "id": "1.1", "label": "Range", "description": "Range req", "type": "numeric",
+        "unit": "km", "threshold": 200, "objective": 1500,
+        "direction": "at_least", "gradeable": True,
+        "to_raw": "T=200km/O=1500km",
+    }])
+    result = validate_requirements(raw)
+    assert result.ok
+    [req] = result.items
+    assert (req.threshold, req.objective) == (200, 1500)
+    assert req.direction == "at_least"
+    assert req.gradeable is True
+    assert req.to_raw == "T=200km/O=1500km"
+
+
+def test_to_fields_missing_is_legal_backcompat():
+    raw = json.dumps([r.to_dict() for r in REQS])
+    result = validate_requirements(raw)
+    assert result.ok
+    assert all(r.gradeable is False for r in result.items)
+
+
+def test_direction_contradicting_ordering_degrades():
+    raw = json.dumps([{
+        "id": "1.1", "label": "Range", "description": "d", "type": "numeric",
+        "unit": "km", "threshold": 200, "objective": 1500,
+        "direction": "at_most", "gradeable": True,
+    }])
+    result = validate_requirements(raw)
+    assert result.ok  # degrades to a warning, never sinks the artifact
+    assert any("contradicts T/O ordering" in w for w in result.warnings)
+    assert result.items[0].gradeable is False
+
+
+def test_invalid_direction_degrades():
+    raw = json.dumps([{
+        "id": "1.1", "label": "Range", "description": "d", "type": "numeric",
+        "unit": "km", "threshold": 200, "objective": 1500,
+        "direction": "upward", "gradeable": True,
+    }])
+    result = validate_requirements(raw)
+    assert result.ok
+    assert result.items[0].direction is None
+    assert result.items[0].gradeable is False
+
+
+def test_gradeable_numeric_without_to_degrades():
+    raw = json.dumps([{
+        "id": "1.1", "label": "Range", "description": "d", "type": "numeric",
+        "unit": "km", "gradeable": True,
+    }])
+    result = validate_requirements(raw)
+    assert result.ok
+    assert result.items[0].gradeable is False
+
+
+def test_enum_tier_options_must_be_members():
+    raw = json.dumps([{
+        "id": "C-01", "label": "MOSA", "description": "d", "type": "enum",
+        "options": ["Compliant", "Partial"], "gradeable": True,
+        "threshold_option": "Partial", "objective_option": "Gold",
+    }])
+    result = validate_requirements(raw)
+    assert result.ok
+    [req] = result.items
+    assert req.threshold_option == "Partial"
+    assert req.objective_option is None
+    assert req.gradeable is False  # degraded by the bad objective_option
+
+
+def test_llm_grade_accepted_on_text():
+    raw = answers_json(overrides={"C-04": {
+        "llm_grade": "MEETS_THRESHOLD",
+        "llm_grade_rationale": "Meets the essential tier per the quote.",
+    }})
+    result = validate_answers(raw, REQS)
+    assert result.ok
+    answer = next(a for a in result.items if a.id == "C-04")
+    assert answer.llm_grade == "MEETS_THRESHOLD"
+    assert answer.llm_grade_rationale == "Meets the essential tier per the quote."
+
+
+def test_llm_grade_invalid_vocabulary_dropped():
+    raw = answers_json(overrides={"C-04": {"llm_grade": "AMAZING"}})
+    result = validate_answers(raw, REQS)
+    assert result.ok
+    answer = next(a for a in result.items if a.id == "C-04")
+    assert answer.llm_grade is None
+    assert any("invalid llm_grade" in w for w in result.warnings)
+
+
+def test_llm_grade_on_non_text_dropped():
+    """Precedence rule: deterministic grading wins for numeric — an llm_grade
+    there is dropped with a warning at validation time."""
+    raw = answers_json(overrides={"C-02": {"llm_grade": "MEETS_OBJECTIVE"}})
+    result = validate_answers(raw, REQS)
+    assert result.ok
+    answer = next(a for a in result.items if a.id == "C-02")
+    assert answer.llm_grade is None
+    assert any("deterministic grading takes precedence" in w for w in result.warnings)

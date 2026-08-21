@@ -18,6 +18,16 @@ CONFIDENCE_LEVELS = ("high", "medium", "low", "none")
 
 NOT_FOUND = "NOT_FOUND"
 
+# T/O validation (PRD §4, docs/T-O_VALIDATION.md)
+DIRECTIONS = ("at_least", "at_most")
+GRADE_CATEGORIES = (
+    "BELOW_THRESHOLD",
+    "MEETS_THRESHOLD",
+    "MEETS_OBJECTIVE",
+    "NOT_GRADEABLE",
+    "NOT_FOUND",
+)
+
 
 class PipelineState(str, Enum):
     """Explicit per-response state machine (PRD §3.6b).
@@ -86,7 +96,12 @@ def can_transition(current: PipelineState, new: PipelineState) -> bool:
 
 @dataclass
 class Requirement:
-    """One extracted RFI requirement (PRD §4, Stage 1 output)."""
+    """One extracted RFI requirement (PRD §4, Stage 1 output).
+
+    The T/O validation fields (docs/T-O_VALIDATION.md) are all optional:
+    artifacts that predate T/O extraction parse cleanly with ``gradeable``
+    False. ``gradeable`` is an explicit extractor judgment, never derived
+    from T/O presence — the example RFI has informational "(T=O)" rows."""
 
     id: str
     label: str
@@ -95,6 +110,13 @@ class Requirement:
     unit: str | None = None  # numeric only
     options: list[str] | None = None  # enum only
     required: bool = False
+    threshold: Any = None  # T value (number|bool), normalized into `unit`
+    objective: Any = None  # O value (number|bool), normalized into `unit`
+    direction: str | None = None  # one of DIRECTIONS
+    gradeable: bool = False
+    threshold_option: str | None = None  # enum only: option satisfying T
+    objective_option: str | None = None  # enum only: option satisfying O
+    to_raw: str | None = None  # verbatim T/O text from the RFI (audit)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +127,13 @@ class Requirement:
             "unit": self.unit,
             "options": self.options,
             "required": self.required,
+            "threshold": self.threshold,
+            "objective": self.objective,
+            "direction": self.direction,
+            "gradeable": self.gradeable,
+            "threshold_option": self.threshold_option,
+            "objective_option": self.objective_option,
+            "to_raw": self.to_raw,
         }
 
     @classmethod
@@ -117,6 +146,13 @@ class Requirement:
             unit=d.get("unit"),
             options=d.get("options"),
             required=bool(d.get("required", False)),
+            threshold=d.get("threshold"),
+            objective=d.get("objective"),
+            direction=d.get("direction"),
+            gradeable=bool(d.get("gradeable", False)),
+            threshold_option=d.get("threshold_option"),
+            objective_option=d.get("objective_option"),
+            to_raw=d.get("to_raw"),
         )
 
 
@@ -166,6 +202,10 @@ class Answer:
     quote: str = ""  # may be "" when NOT_FOUND
     page: int | None = None
     confidence: str = "none"  # one of CONFIDENCE_LEVELS
+    # T/O validation (docs/T-O_VALIDATION.md): LLM-graded text types only —
+    # deterministic grades never live here, only in the validation report.
+    llm_grade: str | None = None  # one of GRADE_CATEGORIES
+    llm_grade_rationale: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -175,6 +215,8 @@ class Answer:
             "quote": self.quote,
             "page": self.page,
             "confidence": self.confidence,
+            "llm_grade": self.llm_grade,
+            "llm_grade_rationale": self.llm_grade_rationale,
         }
 
     @classmethod
@@ -186,6 +228,8 @@ class Answer:
             quote=d.get("quote", ""),
             page=d.get("page"),
             confidence=d.get("confidence", "none"),
+            llm_grade=d.get("llm_grade"),
+            llm_grade_rationale=d.get("llm_grade_rationale"),
         )
 
 

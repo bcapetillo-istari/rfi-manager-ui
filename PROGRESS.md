@@ -145,3 +145,54 @@ Open SDK questions / assumptions (verify on first live run — human step):
 
 Next: M2 — Stage 1 end-to-end (extract → review screen → commit), T2 stage-1,
 T3 prompt-generation tests.
+
+## 2026-08-21 — T/O Validation, client side (branch add-t-o-validation)
+
+Feature spec: docs/T-O_VALIDATION.md (agreed with PO 2026-08-21). Hybrid
+grading: numeric/enum/boolean deterministic client-side; text types LLM-graded
+inside the existing Stage 2 job (no new LLM call); deterministic always wins
+(precedence rule). Grades are DERIVED — computed at export time into the two
+new validation report artifacts; committed answers artifacts never mutated.
+
+Done (all client-side work items, 1–11):
+- PRD §4 amended: Requirement gains threshold/objective/direction/gradeable/
+  threshold_option/objective_option/to_raw; Answer gains llm_grade/
+  llm_grade_rationale; T/O validation rules documented.
+- models.py: new fields with backcompat from_dict (old artifacts parse with
+  gradeable=False); DIRECTIONS + GRADE_CATEGORIES constants; frozen-keys
+  contract test updated to the amended PRD.
+- pipeline.py: validate_requirements validates T/O fields — inconsistencies
+  DEGRADE to gradeable=False with a warning (human-correctable in review)
+  rather than sinking the artifact; direction cross-checked against T/O
+  ordering. validate_answers accepts llm_grade (vocabulary-checked; dropped
+  with a warning on non-text types per the precedence rule).
+  ComparisonCell carries llm_grade/llm_grade_rationale through to exports.
+- NEW units.py: stdlib conversion table (length/time/speed/mass/data-rate)
+  with alias normalization (KTAS/kts/hrs/ft MSL/nmi...). Unknown or
+  cross-family -> UnsupportedConversion (grader fails fast, never guesses).
+- NEW grading.py (pure, no Qt/no SDK): grade_cell() -> GradeRecord with
+  grade/grade_source/grade_reason/original+converted values/T/O/direction.
+  Bands per spec (inclusive edges, relative epsilon 1e-9); T=O collapses to
+  MEETS_OBJECTIVE; T=none grades against O only; ranges/text blobs
+  NOT_GRADEABLE; boolean true->MEETS_OBJECTIVE/false->BELOW_THRESHOLD; enum
+  by tier-option index.
+- file_export.py: validation_report.json + validation_report.html builders
+  (grade-colored cells red/light-green/dark-green/grey, grade+source+
+  rationale+conversion in the hover overlay, legend); shared HTML shell
+  extracted; upload_exports dispatches all 5 artifacts.
+- review_screen.py: T/O columns (threshold/objective/direction/gradeable/
+  T option/O option/T-O raw) editable with inline validation; round-trip
+  verified — committing after review no longer drops extractor T/O data.
+- Tests: 171 passed (was 107): test_units.py, test_grading.py (all five
+  categories, both directions, T=O/T=none, precedence, epsilon, backcompat),
+  T/O validation rules in test_validation.py, validation-report builders in
+  test_file_export.py. ui_smoke.py: 11 scenarios incl. 5-artifact commit and
+  review-screen T/O round-trip.
+
+NOT done (deliberately — PO decision, after schema is buttoned down):
+- Module repo work items 12–14 (extract_rfi_requirements emits T/O fields;
+  extract_response_requirements emits llm_grade for text types; redeploy).
+  Until then everything grades NOT_GRADEABLE/NOT_FOUND — the all-grey report
+  is the designed pre-module-deploy behavior (rollout step 2 of 4).
+
+Blocked: nothing.

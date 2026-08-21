@@ -19,10 +19,41 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..models import REQUIREMENT_TYPES, Requirement
+from ..models import DIRECTIONS, REQUIREMENT_TYPES, Requirement
 
-_COLUMNS = ["id", "label", "description", "type", "unit", "options", "required"]
+_COLUMNS = [
+    "id", "label", "description", "type", "unit", "options", "required",
+    # T/O validation (docs/T-O_VALIDATION.md) — probabilistic extraction must
+    # be human-correctable before commit
+    "threshold", "objective", "direction", "gradeable",
+    "T option", "O option", "T/O raw",
+]
 _COL = {name: i for i, name in enumerate(_COLUMNS)}
+
+
+def _parse_to_value(text: str):
+    """Threshold/objective cell -> None (empty) | bool | number | raw string.
+    Text-type tiers are qualitative and pass through as strings (PRD §4)."""
+    text = text.strip()
+    if not text:
+        return None
+    if text.lower() == "true":
+        return True
+    if text.lower() == "false":
+        return False
+    try:
+        num = float(text)
+        return int(num) if num.is_integer() else num
+    except ValueError:
+        return text
+
+
+def _to_cell_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 class ReviewScreen(QWidget):
@@ -100,6 +131,11 @@ class ReviewScreen(QWidget):
             "unit": (req.unit or "") if req else "",
             # '|'-separated: enum options may legally contain commas
             "options": " | ".join(req.options or []) if req else "",
+            "threshold": _to_cell_text(req.threshold) if req else "",
+            "objective": _to_cell_text(req.objective) if req else "",
+            "T option": (req.threshold_option or "") if req else "",
+            "O option": (req.objective_option or "") if req else "",
+            "T/O raw": (req.to_raw or "") if req else "",
         }
         for name, value in values.items():
             self.table.setItem(row, _COL[name], QTableWidgetItem(value))
@@ -108,12 +144,25 @@ class ReviewScreen(QWidget):
         combo.setCurrentText(req.type if req else "text")
         combo.currentTextChanged.connect(lambda _t: self._revalidate())
         self.table.setCellWidget(row, _COL["type"], combo)
+        direction_combo = QComboBox()
+        direction_combo.addItems(["", *DIRECTIONS])
+        direction_combo.setCurrentText((req.direction or "") if req else "")
+        direction_combo.currentTextChanged.connect(lambda _t: self._revalidate())
+        self.table.setCellWidget(row, _COL["direction"], direction_combo)
         check = QTableWidgetItem()
         check.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
         check.setCheckState(
             Qt.CheckState.Checked if (req and req.required) else Qt.CheckState.Unchecked
         )
         self.table.setItem(row, _COL["required"], check)
+        gradeable_check = QTableWidgetItem()
+        gradeable_check.setFlags(
+            Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+        )
+        gradeable_check.setCheckState(
+            Qt.CheckState.Checked if (req and req.gradeable) else Qt.CheckState.Unchecked
+        )
+        self.table.setItem(row, _COL["gradeable"], gradeable_check)
 
     # ------------------------------------------------------------- editing
 
@@ -150,8 +199,10 @@ class ReviewScreen(QWidget):
                 return item.text().strip() if item else ""
 
             combo = self.table.cellWidget(row, _COL["type"])
+            direction_combo = self.table.cellWidget(row, _COL["direction"])
             options = [o.strip() for o in text("options").split("|") if o.strip()]
             required_item = self.table.item(row, _COL["required"])
+            gradeable_item = self.table.item(row, _COL["gradeable"])
             reqs.append(
                 Requirement(
                     id=text("id"),
@@ -164,6 +215,18 @@ class ReviewScreen(QWidget):
                         required_item
                         and required_item.checkState() is Qt.CheckState.Checked
                     ),
+                    threshold=_parse_to_value(text("threshold")),
+                    objective=_parse_to_value(text("objective")),
+                    direction=(
+                        direction_combo.currentText() or None
+                    ) if direction_combo else None,
+                    gradeable=bool(
+                        gradeable_item
+                        and gradeable_item.checkState() is Qt.CheckState.Checked
+                    ),
+                    threshold_option=text("T option") or None,
+                    objective_option=text("O option") or None,
+                    to_raw=text("T/O raw") or None,
                 )
             )
         return reqs
@@ -189,6 +252,36 @@ class ReviewScreen(QWidget):
                 errors.append(f"{where}: enum without options")
             if req.type == "numeric" and not req.unit:
                 warnings.append(f"{where}: numeric without unit")
+            # T/O validation (docs/T-O_VALIDATION.md)
+            if req.gradeable:
+                if req.type == "numeric" and req.threshold is None and req.objective is None:
+                    errors.append(f"{where}: gradeable numeric without threshold/objective")
+                if req.type == "enum" and not (req.threshold_option or req.objective_option):
+                    errors.append(f"{where}: gradeable enum without T/O options")
+            if req.type == "numeric":
+                for name, v in (("threshold", req.threshold), ("objective", req.objective)):
+                    if v is not None and (
+                        isinstance(v, bool) or not isinstance(v, (int, float))
+                    ):
+                        errors.append(f"{where}: numeric {name} does not parse as a number")
+                if (
+                    isinstance(req.threshold, (int, float))
+                    and isinstance(req.objective, (int, float))
+                    and req.threshold != req.objective
+                    and req.direction
+                ):
+                    implied = "at_least" if req.objective > req.threshold else "at_most"
+                    if req.direction != implied:
+                        errors.append(
+                            f"{where}: direction contradicts T/O ordering "
+                            f"(implies {implied})"
+                        )
+            if req.type == "enum":
+                opts = req.options or []
+                if req.threshold_option and req.threshold_option not in opts:
+                    errors.append(f"{where}: T option not in options")
+                if req.objective_option and req.objective_option not in opts:
+                    errors.append(f"{where}: O option not in options")
         if not self.schema_edit.text().strip():
             errors.append("schema_version is empty")
         return errors, warnings

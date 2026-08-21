@@ -111,7 +111,18 @@ Requirement (Stage 1 output, list of):
     "type": "boolean" | "numeric" | "enum" | "text",
     "unit": "kg" | null,           # numeric only
     "options": ["Compliant", ...] | null,   # enum only
-    "required": true | false }
+    "required": true | false,
+    # T/O validation fields (docs/T-O_VALIDATION.md) — all optional/nullable;
+    # absent fields mean the requirement predates T/O extraction (gradeable
+    # defaults false). T and O are normalized into `unit` by the extractor.
+    "threshold": <number|bool|null>,        # T value
+    "objective": <number|bool|null>,        # O value
+    "direction": "at_least" | "at_most" | null,   # comparison polarity
+    "gradeable": true | false,     # explicit LLM judgment, NOT derived from
+                                   # T/O presence (informational "(T=O)" rows)
+    "threshold_option": "<option>" | null,  # enum only: option satisfying T
+    "objective_option": "<option>" | null,  # enum only: option satisfying O
+    "to_raw": "<verbatim T/O text from the RFI>" | null }   # audit trail
 Requirements artifact uploaded to Istari wraps the list with metadata:
   { "rfi_uuid": ..., "rfi_revision": ..., "schema_version": "1.0",
     "generated_at": iso8601, "llm_model": ..., "requirements": [ ... ] }
@@ -122,7 +133,14 @@ Answer (Stage 2 output, list of):
     "unit": "kg" | null,
     "quote": "<verbatim supporting sentence>",   # may be "" when NOT_FOUND
     "page": <int|null>,
-    "confidence": "high" | "medium" | "low" | "none" }
+    "confidence": "high" | "medium" | "low" | "none",
+    # T/O validation fields (docs/T-O_VALIDATION.md) — optional/nullable.
+    # Populated by the LLM for text-type gradeable requirements ONLY;
+    # numeric/enum/boolean grading is deterministic client-side and lives in
+    # the validation report artifacts, never here.
+    "llm_grade": "BELOW_THRESHOLD" | "MEETS_THRESHOLD" | "MEETS_OBJECTIVE"
+                 | "NOT_GRADEABLE" | "NOT_FOUND" | null,
+    "llm_grade_rationale": "<one line citing the quote>" | null }
 Answers artifact wraps with provenance:
   { "response_uuid": ..., "response_revision": ..., "vendor": "<from doc or user>",
     "schema_version": "<matches requirements artifact>", "extracted_at": iso8601,
@@ -136,6 +154,17 @@ options; booleans are true/false; NOT_FOUND allowed anywhere with confidence
 via the validation_errors job parameter (the module appends it to its prompt);
 if still invalid, mark the item failed with reasons shown in the UI. Never
 upload an artifact that failed validation.
+
+T/O field validation (requirements): threshold/objective types must match the
+requirement type (numbers for numeric, booleans for boolean); direction must
+be "at_least"/"at_most" when set; when T != O numerically, direction must
+agree with T/O ordering (mismatch -> warning, gradeable forced false);
+threshold_option/objective_option must be members of options (enum only);
+gradeable=true requires T or O present for the requirement's type. Missing
+T/O fields are legal everywhere (backcompat: parse cleanly, gradeable
+defaults false). Answers: llm_grade must be one of the five grade categories
+when set; llm_grade on a non-text requirement is a warning (deterministic
+grading wins; see docs/T-O_VALIDATION.md precedence rule).
 
 ## 5. Functional requirements
 FR1  Stage 1 UI: UUID (+ optional revision) input; "Extract requirements" button;

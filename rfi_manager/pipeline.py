@@ -26,6 +26,8 @@ from .istari_adapter import (
 )
 from .models import (
     CONFIDENCE_LEVELS,
+    DIRECTIONS,
+    GRADE_CATEGORIES,
     NOT_FOUND,
     REQUIREMENT_TYPES,
     Answer,
@@ -131,6 +133,8 @@ def validate_requirements(raw_llm_output: str) -> ValidationResult:
             result.warnings.append(f"{where}: unit given for non-numeric type; dropped")
             unit = None
 
+        to_fields = _validate_to_fields(entry, rtype, options, where, result)
+
         result.items.append(
             Requirement(
                 id=rid,
@@ -140,9 +144,100 @@ def validate_requirements(raw_llm_output: str) -> ValidationResult:
                 unit=unit,
                 options=options,
                 required=bool(entry.get("required", False)),
+                **to_fields,
             )
         )
     return result
+
+
+def _validate_to_fields(
+    entry: dict[str, Any],
+    rtype: str,
+    options: list[str] | None,
+    where: str,
+    result: ValidationResult,
+) -> dict[str, Any]:
+    """Validate the optional T/O fields (PRD §4, docs/T-O_VALIDATION.md).
+
+    All fields are legal to omit (backcompat). Inconsistencies degrade to
+    gradeable=False with a warning rather than erroring the whole artifact —
+    a bad T/O extraction shouldn't sink an otherwise-good requirements list;
+    it's human-correctable in the review screen."""
+    threshold = entry.get("threshold")
+    objective = entry.get("objective")
+    direction = entry.get("direction")
+    gradeable = bool(entry.get("gradeable", False))
+    threshold_option = entry.get("threshold_option")
+    objective_option = entry.get("objective_option")
+    to_raw = entry.get("to_raw")
+
+    def degrade(msg: str) -> None:
+        nonlocal gradeable
+        result.warnings.append(f"{where}: {msg}")
+        gradeable = False
+
+    if to_raw is not None and not isinstance(to_raw, str):
+        result.warnings.append(f"{where}: non-string to_raw; dropped")
+        to_raw = None
+    if direction is not None and direction not in DIRECTIONS:
+        degrade(f"invalid direction {direction!r}; gradeable forced false")
+        direction = None
+
+    def _num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    if rtype == "numeric":
+        if threshold is not None and not _num(threshold):
+            degrade(f"numeric threshold must be a number, got {threshold!r}")
+            threshold = None
+        if objective is not None and not _num(objective):
+            degrade(f"numeric objective must be a number, got {objective!r}")
+            objective = None
+        # direction must agree with T/O ordering when both present and distinct
+        if _num(threshold) and _num(objective) and threshold != objective and direction:
+            implied = "at_least" if objective > threshold else "at_most"
+            if direction != implied:
+                degrade(
+                    f"direction {direction!r} contradicts T/O ordering "
+                    f"(T={threshold}, O={objective} implies {implied!r})"
+                )
+        if gradeable and threshold is None and objective is None:
+            degrade("gradeable=true but no numeric threshold or objective")
+    elif rtype == "boolean":
+        if threshold is not None and not isinstance(threshold, bool):
+            degrade(f"boolean threshold must be true/false, got {threshold!r}")
+            threshold = None
+        if objective is not None and not isinstance(objective, bool):
+            degrade(f"boolean objective must be true/false, got {objective!r}")
+            objective = None
+    elif rtype == "enum":
+        opts = options or []
+        if threshold_option is not None and threshold_option not in opts:
+            degrade(f"threshold_option {threshold_option!r} not in options")
+            threshold_option = None
+        if objective_option is not None and objective_option not in opts:
+            degrade(f"objective_option {objective_option!r} not in options")
+            objective_option = None
+        if gradeable and threshold_option is None and objective_option is None:
+            degrade("gradeable=true but no threshold_option/objective_option")
+    # text: any T/O content is allowed through as-is — tiers are qualitative
+    # (graded by the LLM at Stage 2), so there is nothing to type-check here
+
+    if rtype != "enum" and (threshold_option or objective_option):
+        result.warnings.append(
+            f"{where}: threshold_option/objective_option given for non-enum type; dropped"
+        )
+        threshold_option = objective_option = None
+
+    return {
+        "threshold": threshold,
+        "objective": objective,
+        "direction": direction,
+        "gradeable": gradeable,
+        "threshold_option": threshold_option,
+        "objective_option": objective_option,
+        "to_raw": to_raw,
+    }
 
 
 def _coerce_value(entry_value: Any, req: Requirement, where: str, result: ValidationResult) -> Any:
@@ -266,8 +361,30 @@ def validate_answers(raw_llm_output: str, requirements: list[Requirement]) -> Va
         if req.type == "numeric" and value != NOT_FOUND and unit is None:
             unit = req.unit  # answers inherit the requirement's unit
 
+        # T/O validation (PRD §4): llm_grade is for text types only —
+        # deterministic grading wins elsewhere (precedence rule)
+        llm_grade = entry.get("llm_grade")
+        llm_grade_rationale = entry.get("llm_grade_rationale")
+        if llm_grade is not None and llm_grade not in GRADE_CATEGORIES:
+            result.warnings.append(f"{where}: invalid llm_grade {llm_grade!r}; dropped")
+            llm_grade = None
+        if llm_grade is not None and req.type != "text":
+            result.warnings.append(
+                f"{where}: llm_grade on a {req.type} requirement; dropped "
+                "(deterministic grading takes precedence)"
+            )
+            llm_grade = None
+        if llm_grade_rationale is not None and not isinstance(llm_grade_rationale, str):
+            llm_grade_rationale = None
+        if llm_grade is None:
+            llm_grade_rationale = None
+
         result.items.append(
-            Answer(id=aid, value=value, unit=unit, quote=quote, page=page, confidence=confidence)
+            Answer(
+                id=aid, value=value, unit=unit, quote=quote, page=page,
+                confidence=confidence, llm_grade=llm_grade,
+                llm_grade_rationale=llm_grade_rationale,
+            )
         )
 
     missing = [rid for rid in by_id if rid not in seen]
@@ -1246,6 +1363,9 @@ class ComparisonCell:
     quote: str = ""
     page: int | None = None
     confidence: str = "none"
+    # T/O validation (PRD §4): LLM grade for text types, from Answer
+    llm_grade: str | None = None
+    llm_grade_rationale: str | None = None
 
     @property
     def is_not_found(self) -> bool:
@@ -1303,6 +1423,8 @@ def build_comparison_rows(
                 cells[req.id] = ComparisonCell(
                     value=answer.value, unit=answer.unit, quote=answer.quote,
                     page=answer.page, confidence=answer.confidence,
+                    llm_grade=answer.llm_grade,
+                    llm_grade_rationale=answer.llm_grade_rationale,
                 )
         rows.append(
             ComparisonRow(
