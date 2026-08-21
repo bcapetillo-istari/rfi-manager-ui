@@ -158,8 +158,12 @@ def _grade_enum(req: Requirement, cell: ComparisonCell) -> GradeRecord:
 
     options = req.options
     value_idx = options.index(cell.value)
-    obj_idx = options.index(req.objective_option) if req.objective_option in options else None
-    thr_idx = options.index(req.threshold_option) if req.threshold_option in options else None
+    obj_idx = (
+        options.index(req.objective_option) if req.objective_option in options else None
+    )
+    thr_idx = (
+        options.index(req.threshold_option) if req.threshold_option in options else None
+    )
     if obj_idx is None and thr_idx is None:
         return _not_gradeable(req, cell, "enum_tiers_not_in_options")
 

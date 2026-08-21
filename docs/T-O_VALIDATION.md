@@ -48,6 +48,29 @@ Hybrid grading — deterministic where possible, LLM only where necessary, with 
 
 **Polarity/direction:** `value >= T` is wrong for lower-is-better requirements (weight, cost, lead time). The requirements schema gains an explicit `direction` field (`"at_least" | "at_most"`), LLM-extracted, cross-checked client-side against T/O ordering when T ≠ O (mismatch → validation warning + gradeable=false), and human-correctable in the Stage 1 review screen. For T=O numeric requirements direction is unknowable from the values alone — the LLM must emit it.
 
+**Grading policy (PO decisions, 2026-08-21 live tuning):**
+- **Trust the vendor.** RFI responses are taken at face value — the grader
+  compares what the vendor SAYS against the requirement tiers; it never
+  audits honesty or discounts claims. An explicit "meets T=O" statement
+  grades as met. Verification of claims belongs to later acquisition phases
+  (proposals, demos), not this tool. (Prompt B3.)
+- **Multi-configuration responses** (a vendor offering e.g. Block 1 and
+  Block 2 variants) are an edge case deferred until confirmed in real data —
+  extraction may currently mix configurations across rows.
+- **T=none rows where the capability is absent grade MEETS_THRESHOLD** (the
+  threshold is trivially satisfied) — accepted for v1; the hover rationale
+  explains it.
+- **Single-call text grading accepted** (extraction + grading in one Stage 2
+  run). Known tradeoff, decided knowingly: full-document context makes the
+  grade MORE accurate but less traceable — the grade is not provably a
+  function of the recorded value/quote (deterministic types are unaffected;
+  their grades are pure functions of the extracted value). Revisit and split
+  into a separate grade_answers module function (answers JSON + tiers only,
+  no document text; re-runnable without re-ingest) if any of these occur:
+  (a) grades observed contradicting their own recorded value/quote,
+  (b) humans editing extracted answers need grades to follow,
+  (c) the eval framework needs grading skill isolated from extraction skill.
+
 **Deferred (explicitly out of scope for v1):** confidence-dependent coloring/markers in the HTML report (grade drives color; extraction confidence stays in the tooltip/JSON only); LLM grading of enum types; grade coloring in the in-app Qt comparison table; range-value grading.
 
 ### Schema Changes (PRD §4 must be amended FIRST — hard rule)
