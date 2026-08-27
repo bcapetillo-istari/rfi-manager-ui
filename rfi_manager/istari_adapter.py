@@ -341,17 +341,25 @@ class IstariAdapter:
     # ------------------------------------------------------------- systems
 
     def list_system_branches(self, system_id: str) -> list[BranchInfo]:
-        """``client.get_system(system_id)`` -> ``System.list_branches()``
-        -> BranchInfo per SnapshotTag (docs/SYSTEM_SELECTION.md). Feeds the
-        Stage 1 branch dropdown. ``list_branches`` excludes the baseline tag;
-        a system with no user branches yields an empty list (verify on first
-        live run what the Istari UI's default branch is named)."""
+        """``client.list_tags(system_id=...)`` (paginated) -> BranchInfo per
+        SnapshotTag, INCLUDING the baseline (docs/SYSTEM_SELECTION.md). Feeds
+        the Stage 1 branch dropdown. ``System.list_branches()`` is NOT used
+        because it excludes the baseline tag, and users legitimately keep
+        files there. User branches keep API order; the baseline sorts last so
+        the dropdown defaults to a user branch when one exists."""
+        tags = []
         try:
-            system = self._client.get_system(system_id)
-            branches = system.list_branches()
+            page_num = 1
+            while True:
+                page = self._client.list_tags(system_id=system_id, page=page_num)
+                tags.extend(page.items)
+                if page_num * page.size >= page.total:
+                    break
+                page_num += 1
         except Exception as e:
             raise IstariError(f"cannot list branches of system {system_id}: {e}") from e
-        return [BranchInfo(name=tag.tag, snapshot_id=tag.snapshot_id) for tag in branches]
+        ordered = [t for t in tags if not t.is_baseline] + [t for t in tags if t.is_baseline]
+        return [BranchInfo(name=t.tag, snapshot_id=t.snapshot_id) for t in ordered]
 
     def list_system_files(self, system_id: str, branch_name: str) -> list[SystemFileInfo]:
         """``client.get_system(system_id)`` -> ``System.get_branch(branch_name)``

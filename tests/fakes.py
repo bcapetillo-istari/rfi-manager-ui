@@ -187,11 +187,14 @@ class FakeIstari:
         return self.revision_owner[revision_id]
 
     def list_system_branches(self, system_id: str) -> list[BranchInfo]:
+        """Like the real adapter: every system has a baseline tag, always
+        listed LAST (user branches keep insertion order)."""
         if system_id not in self.systems:
             raise IstariError(f"cannot list branches of system {system_id}: not found")
+        names = [b for b in self.systems[system_id] if b != "baseline"] + ["baseline"]
         return [
             BranchInfo(name=branch, snapshot_id=f"{system_id}-{branch}-snap")
-            for branch in self.systems[system_id]
+            for branch in names
         ]
 
     def list_system_files(self, system_id: str, branch_name: str) -> list[SystemFileInfo]:
@@ -200,6 +203,8 @@ class FakeIstari:
                 f"cannot list files of system {system_id} branch {branch_name!r}: not found"
             )
         if branch_name not in self.systems[system_id]:
+            if branch_name == "baseline":
+                return []  # every real system has a baseline; may track nothing
             raise IstariError(
                 f"cannot list files of system {system_id} branch {branch_name!r}: "
                 "no branch with that name"

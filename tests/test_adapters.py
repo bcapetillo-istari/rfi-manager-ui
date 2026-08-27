@@ -121,8 +121,9 @@ def test_fake_system_listing_flow():
     resp = fake.add_model("acme.pdf", text="A")
     system_id = fake.add_system([rfi.model_id, resp.model_id])
 
-    [branch] = fake.list_system_branches(system_id)
-    assert branch.name == "main"
+    # baseline is always listed, LAST — the dropdown defaults to a user branch
+    assert [b.name for b in fake.list_system_branches(system_id)] == ["main", "baseline"]
+    assert fake.list_system_files(system_id, "baseline") == []
 
     files = fake.list_system_files(system_id, "main")
     assert [(f.resource_id, f.revision_id, f.name) for f in files] == [
