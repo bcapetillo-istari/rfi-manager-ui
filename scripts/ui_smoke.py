@@ -101,8 +101,10 @@ def main() -> None:
     # validation twice (FR4, §4 retry-once). All entries checked by default;
     # the RFI's own entry is greyed out and unselectable.
     rfi_item = win.stage2_page.file_list.item(0)
-    assert "(RFI — cannot be a response)" in rfi_item.text()
+    assert rfi_item.text() == "rfi.pdf"  # no appended text — greyed instead
     assert not rfi_item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert rfi_item.foreground().color().red() == 160  # explicit grey tint
+    assert "cannot be selected" in rfi_item.toolTip()
     assert win.stage2_page.selected_pairs() == [
         (ra.latest_revision_id, ra.model_id),
         (rb.latest_revision_id, rb.model_id),

@@ -7,6 +7,7 @@ label, per-response status list, failure reasons with a retry action, and a
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -115,9 +116,13 @@ class Stage2Page(QWidget):
             item = QListWidgetItem(f.name)
             item.setData(Qt.ItemDataRole.UserRole, f)
             if f.resource_id == rfi_resource_id:
-                item.setText(f"{f.name}  (RFI — cannot be a response)")
-                item.setFlags(Qt.ItemFlag.NoItemFlags)  # disabled + greyed
+                # greyed out, no extra text — the explanation lives in the
+                # tooltip instead (explicit foreground: the app stylesheet
+                # keeps disabled items near-normal colored otherwise)
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
                 item.setCheckState(Qt.CheckState.Unchecked)
+                item.setForeground(QBrush(QColor(160, 160, 160)))
+                item.setToolTip("This is the RFI — it cannot be selected as a response.")
             else:
                 item.setFlags(
                     Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
