@@ -111,6 +111,11 @@ class MainWindow(QMainWindow):
         self.requirements_artifact: RequirementsArtifact | None = None
         self._stage1_result: Stage1Result | None = None
         self._batch_running = False
+        # system-based selection state (docs/SYSTEM_SELECTION.md): the last
+        # loaded system/branch, stamped into the project at commit time
+        self._system_uuid: str | None = None
+        self._system_branch: str | None = None
+        self._system_files: list = []  # last listing, for re-greying the RFI
 
         self.stage1_page = Stage1Page()
         self.review_screen = ReviewScreen()
@@ -225,6 +230,8 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.log_view)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
 
+        self.stage1_page.load_system_requested.connect(self.load_system)
+        self.stage1_page.branch_selected.connect(self.load_system_files)
         self.stage1_page.extract_requested.connect(self.start_extraction)
         self.review_screen.commit_requested.connect(self.start_commit)
         self.stage2_page.ingest_requested.connect(self.start_ingest)
@@ -376,6 +383,55 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ stage 1
 
+    # ---------------------------------------------- system-based selection
+
+    def load_system(self, system_id: str) -> None:
+        """List an RFI system's branches for the Stage 1 branch dropdown
+        (docs/SYSTEM_SELECTION.md)."""
+        istari = self._require_connection()
+        if istari is None:
+            return
+        self.log(f"loading system {system_id}")
+        worker = Worker(istari.list_system_branches, system_id)
+        worker.signals.finished.connect(
+            lambda branches, s=system_id: self._on_branches_listed(s, branches)
+        )
+        worker.signals.failed.connect(
+            lambda reason: QMessageBox.critical(self, "Load system failed", reason)
+        )
+        self._spawn(worker)
+
+    def _on_branches_listed(self, system_id: str, branches: list) -> None:
+        self._system_uuid = system_id
+        self.log(f"system {system_id}: {len(branches)} branch(es)")
+        self.stage1_page.set_branches(branches)
+
+    def load_system_files(self, system_id: str, branch_name: str) -> None:
+        """List a branch's tracked files for both pickers: the Stage 1 RFI
+        dropdown and the Stage 2 response checklist."""
+        istari = self._require_connection()
+        if istari is None:
+            return
+        worker = Worker(istari.list_system_files, system_id, branch_name)
+        worker.signals.finished.connect(
+            lambda files, b=branch_name: self._on_system_files_listed(b, files)
+        )
+        worker.signals.failed.connect(
+            lambda reason: QMessageBox.critical(self, "Load files failed", reason)
+        )
+        self._spawn(worker)
+
+    def _on_system_files_listed(self, branch_name: str, files: list) -> None:
+        self._system_branch = branch_name
+        self._system_files = files
+        self.log(f"branch {branch_name!r}: {len(files)} file(s)")
+        self.stage1_page.set_files(files)
+        # the RFI entry is greyed out in the response picker so it cannot be
+        # ingested as a response (FR4); before a project exists there is no
+        # RFI to grey yet
+        rfi_resource_id = self.project.rfi_uuid if self.project else None
+        self.stage2_page.set_files(files, rfi_resource_id)
+
     def start_extraction(self, rfi_uuid: str, revision_id: str) -> None:
         if self._require_connection() is None:
             return
@@ -493,11 +549,18 @@ class MainWindow(QMainWindow):
                 rfi_uuid=result.rfi.model_id, rfi_revision=result.rfi_revision_id
             )
         self.project.rfi_revision = result.rfi_revision_id
+        if self._system_uuid:
+            self.project.system_uuid = self._system_uuid
+            self.project.system_branch = self._system_branch
         self.project.requirements_artifact_uuid = info.artifact_id
         self.project.requirements_artifact_revision = info.revision_id
         self.project.schema_version = artifact.schema_version
         self.requirements_artifact = artifact
         self._save_project()
+        # the RFI is only now known — re-grey its entry in the response
+        # picker so it cannot be ingested as a response (FR4)
+        if self._system_files:
+            self.stage2_page.set_files(self._system_files, self.project.rfi_uuid)
         self.log(
             f"committed requirements artifact {info.artifact_id} "
             f"(revision {info.revision_id}, schema v{artifact.schema_version})"
@@ -512,10 +575,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ stage 2
 
-    def start_ingest(self, revision_ids: list[str], force: bool) -> None:
-        """Stage 2 now takes response *revision* ids, not model UUIDs — each
-        is resolved to its owning model off the UI thread before anything
-        else happens."""
+    def start_ingest(self, pairs: list[tuple[str, str]], force: bool) -> None:
+        """Stage 2 receives pre-resolved (revision_id, resource_id) pairs
+        straight from the system listing (docs/SYSTEM_SELECTION.md) — the
+        branch-pinned revision, no per-response resolution round-trips."""
         if self._require_connection() is None:
             return
         if self.project is None or self.requirements_artifact is None:
@@ -523,27 +586,14 @@ class MainWindow(QMainWindow):
                 self, "No schema", "Commit a requirements schema first."
             )
             return
-        # _run_responses (reached via _on_revisions_resolved) already guards
-        # against a concurrent batch — checking here too would race it,
-        # since resolution now happens asynchronously.
-        worker = Worker(pipeline.resolve_response_revisions, self._istari, revision_ids)
-        worker.signals.finished.connect(
-            lambda result, f=force: self._on_revisions_resolved(result, f)
-        )
-        worker.signals.failed.connect(
-            lambda reason: self.log(f"response revision lookup FAILED: {reason}")
-        )
-        self._spawn(worker)
+        # belt-and-suspenders: the RFI entry is unselectable in the picker,
+        # but never ingest the RFI as a response regardless (FR4)
+        pairs = [(rev, uuid) for rev, uuid in pairs if uuid != self.project.rfi_uuid]
+        self._start_response_batch(pairs, force)
 
-    def _on_revisions_resolved(
-        self,
-        result: tuple[list[tuple[str, str]], list[tuple[str, str]]],
-        force: bool,
+    def _start_response_batch(
+        self, resolved: list[tuple[str, str]], force: bool
     ) -> None:
-        resolved, failed = result
-        for revision_id, reason in failed:
-            self.log(f"cannot resolve response revision {revision_id}: {reason}")
-            self.stage2_page.update_status(revision_id, "failed", reason)
         if self.project is None:  # project could have been closed meanwhile
             return
         current_schema = self.project.schema_version
@@ -794,6 +844,19 @@ class MainWindow(QMainWindow):
             f"reloaded requirements artifact "
             f"{self.project.requirements_artifact_uuid} (schema v{artifact.schema_version})"
         )
+        # repopulate the selection pickers from the stored system pointer
+        # (docs/SYSTEM_SELECTION.md); pre-system project files have none and
+        # just need the system id re-entered
+        if self.project.system_uuid:
+            self._system_uuid = self.project.system_uuid
+            self._system_branch = self.project.system_branch
+            self.stage1_page.system_edit.setText(self.project.system_uuid)
+            if self.project.system_branch:
+                self.load_system_files(
+                    self.project.system_uuid, self.project.system_branch
+                )
+            else:
+                self.load_system(self.project.system_uuid)
         for record in self.project.responses:
             self.stage2_page.update_status(
                 record.uuid, record.state.value, record.error or ""
@@ -828,9 +891,13 @@ class MainWindow(QMainWindow):
         result, schema of record, comparison table, status list)."""
         self._stage1_result = None
         self.requirements_artifact = None
+        self._system_uuid = None
+        self._system_branch = None
+        self._system_files = []
         self.review_screen.load([], "1.0")
         self.comparison_page.load([], [])
         self.stage2_page.status_table.setRowCount(0)
+        self.stage2_page.set_files([], None)
         self._stack.setCurrentWidget(self.stage1_page)
 
     def open_from_rfi(self, rfi_uuid: str) -> None:

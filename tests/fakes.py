@@ -22,12 +22,14 @@ from rfi_manager.istari_adapter import (
     LLM_RESPONSE_OUTPUT_ARTIFACT,
     LLM_RFI_OUTPUT_ARTIFACT,
     ArtifactInfo,
+    BranchInfo,
     CredentialInfo,
     CredentialSelection,
     IstariError,
     JobState,
     LinkInfo,
     ModelInfo,
+    SystemFileInfo,
 )
 
 
@@ -49,6 +51,8 @@ class FakeIstari:
         self.credentials: list[CredentialInfo] = []
         self.revision_owner: dict[str, str] = {}  # revision_id -> resource id
         self.revision_bytes: dict[str, bytes] = {}  # revision_id -> raw content
+        # system_id -> branch name -> list of member model ids
+        self.systems: dict[str, dict[str, list[str]]] = {}
         self.auto_complete_jobs = True
         self.llm_outputs: list[str] = []  # FIFO consumed by completing LLM jobs
         self.suppress_llm_artifacts = False  # simulate a module writing no output
@@ -92,6 +96,15 @@ class FakeIstari:
         exists (for tests that skip the pipeline's extraction step)."""
         job_id = self.submit_extraction_job(model_id)
         self._complete(job_id)
+
+    def add_system(
+        self, model_ids: list[str], branch: str = "main"
+    ) -> str:
+        """Test helper: register a system whose ``branch`` tracks the given
+        models (each at its latest revision, like a real branch snapshot)."""
+        system_id = f"system-{next(self._seq)}"
+        self.systems.setdefault(system_id, {})[branch] = list(model_ids)
+        return system_id
 
     def add_credential(self, name: str, auth_type: str = "token") -> CredentialInfo:
         cred = CredentialInfo(
@@ -172,6 +185,37 @@ class FakeIstari:
         if revision_id not in self.revision_owner:
             raise IstariError(f"cannot resolve revision {revision_id}: not found")
         return self.revision_owner[revision_id]
+
+    def list_system_branches(self, system_id: str) -> list[BranchInfo]:
+        if system_id not in self.systems:
+            raise IstariError(f"cannot list branches of system {system_id}: not found")
+        return [
+            BranchInfo(name=branch, snapshot_id=f"{system_id}-{branch}-snap")
+            for branch in self.systems[system_id]
+        ]
+
+    def list_system_files(self, system_id: str, branch_name: str) -> list[SystemFileInfo]:
+        if system_id not in self.systems:
+            raise IstariError(
+                f"cannot list files of system {system_id} branch {branch_name!r}: not found"
+            )
+        if branch_name not in self.systems[system_id]:
+            raise IstariError(
+                f"cannot list files of system {system_id} branch {branch_name!r}: "
+                "no branch with that name"
+            )
+        files = []
+        for model_id in self.systems[system_id][branch_name]:
+            info = self.models[model_id]
+            files.append(
+                SystemFileInfo(
+                    resource_id=info.model_id,
+                    revision_id=info.latest_revision_id,
+                    name=info.name,
+                    resource_type="model",
+                )
+            )
+        return files
 
     def read_revision_bytes(self, revision_id: str) -> bytes:
         if revision_id not in self.revision_owner:

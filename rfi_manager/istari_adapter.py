@@ -77,6 +77,60 @@ class LinkInfo:
 
 
 @dataclass(frozen=True)
+class BranchInfo:
+    """One branch of an Istari System (docs/SYSTEM_SELECTION.md)."""
+
+    name: str  # SnapshotTag.tag
+    snapshot_id: str
+
+
+# SnapshotRevisionSearchItem.resource_type value for models. NOTE (verified
+# live 2026-08-27): the branch-revisions search endpoint returns CAPITALIZED
+# values ('Model', 'Artifact'), unlike the v2 ResourceType enum's lowercase
+# ('model', 'artifact', ...) — match case-insensitively.
+_RESOURCE_TYPE_MODEL = "model"
+
+# Display-name prefix for the standalone Models the pipeline stages as LLM
+# job inputs (register_text_model). They are genuine Models and get tracked
+# on system branches (verified live 2026-08-27), so the selection pickers
+# must screen them out — they are pipeline plumbing, not user files.
+STAGED_TEXT_MODEL_PREFIX = "extracted-text-"
+
+
+@dataclass(frozen=True)
+class SystemFileInfo:
+    """One file tracked by a system branch, as shown in the selection pickers.
+
+    ``resource_id`` is the model id the whole pipeline runs on;
+    ``revision_id`` is the revision pinned by the branch snapshot (stronger
+    provenance than "latest" — the FR5 idempotency key cannot drift
+    mid-batch)."""
+
+    resource_id: str
+    revision_id: str
+    name: str
+    resource_type: str | None = None
+
+    @property
+    def is_model(self) -> bool:
+        """True when the tracked resource is a Model — the only resource type
+        the pipeline can run on. Case-insensitive: the live branch-listing
+        endpoint says 'Model' while the v2 enum says 'model'. ``None`` (field
+        unpopulated) counts as a model, fail-open."""
+        return (
+            self.resource_type is None
+            or self.resource_type.lower() == _RESOURCE_TYPE_MODEL
+        )
+
+    @property
+    def is_selectable(self) -> bool:
+        """What the selection pickers show: Models, excluding the pipeline's
+        own staged-text plumbing models (verified live: both get tracked on
+        system branches alongside the user's actual files)."""
+        return self.is_model and not self.name.startswith(STAGED_TEXT_MODEL_PREFIX)
+
+
+@dataclass(frozen=True)
 class CredentialInfo:
     """A Linked Account (stored credential) selectable in the UI."""
 
@@ -283,6 +337,55 @@ class IstariAdapter:
         )
 
     # --------------------------------------------------------------- jobs
+
+    # ------------------------------------------------------------- systems
+
+    def list_system_branches(self, system_id: str) -> list[BranchInfo]:
+        """``client.get_system(system_id)`` -> ``System.list_branches()``
+        -> BranchInfo per SnapshotTag (docs/SYSTEM_SELECTION.md). Feeds the
+        Stage 1 branch dropdown. ``list_branches`` excludes the baseline tag;
+        a system with no user branches yields an empty list (verify on first
+        live run what the Istari UI's default branch is named)."""
+        try:
+            system = self._client.get_system(system_id)
+            branches = system.list_branches()
+        except Exception as e:
+            raise IstariError(f"cannot list branches of system {system_id}: {e}") from e
+        return [BranchInfo(name=tag.tag, snapshot_id=tag.snapshot_id) for tag in branches]
+
+    def list_system_files(self, system_id: str, branch_name: str) -> list[SystemFileInfo]:
+        """``client.get_system(system_id)`` -> ``System.get_branch(branch_name)``
+        -> ``System.list_branch_revisions(branch)`` -> SystemFileInfo per
+        tracked file (docs/SYSTEM_SELECTION.md). Internally paginated by the
+        SDK — 100+ files is fine. Entries without a resource or revision id
+        are skipped (nothing the pipeline could run on)."""
+        try:
+            system = self._client.get_system(system_id)
+            branch = system.get_branch(branch_name)
+            revisions = system.list_branch_revisions(branch)
+        except Exception as e:
+            raise IstariError(
+                f"cannot list files of system {system_id} branch {branch_name!r}: {e}"
+            ) from e
+        files = []
+        for item in revisions:
+            resource_id = getattr(item, "resource_id", None)
+            revision_id = getattr(item, "revision_id", None)
+            if not resource_id or not revision_id:
+                continue
+            files.append(
+                SystemFileInfo(
+                    resource_id=resource_id,
+                    revision_id=revision_id,
+                    name=(
+                        getattr(item, "display_name", None)
+                        or getattr(item, "name", None)
+                        or resource_id
+                    ),
+                    resource_type=getattr(item, "resource_type", None),
+                )
+            )
+        return files
 
     def read_revision_bytes(self, revision_id: str) -> bytes:
         """``client.get_revision(revision_id).read_bytes()`` — FileRevision

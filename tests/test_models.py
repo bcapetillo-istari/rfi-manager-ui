@@ -64,6 +64,8 @@ def test_project_round_trip():
     project = Project(
         rfi_uuid="rfi-123",
         rfi_revision="rev-1",
+        system_uuid="system-7",
+        system_branch="main",
         requirements_artifact_uuid="art-55",
         requirements_artifact_revision="art-55-rev-1",
         schema_version="1.0",
@@ -74,6 +76,17 @@ def test_project_round_trip():
         ],
     )
     assert Project.from_dict(project.to_dict()) == project
+
+
+def test_project_without_system_fields_loads():
+    """Pre-system .rfiproj files (docs/SYSTEM_SELECTION.md) have no
+    system_uuid/system_branch keys — they must load with both None."""
+    d = Project(rfi_uuid="rfi-123").to_dict()
+    del d["system_uuid"]
+    del d["system_branch"]
+    project = Project.from_dict(d)
+    assert project.system_uuid is None
+    assert project.system_branch is None
 
 
 def test_project_rejects_unknown_format_version():

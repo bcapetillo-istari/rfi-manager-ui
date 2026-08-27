@@ -15,6 +15,7 @@ from typing import Any, Callable, Protocol
 
 from .istari_adapter import (
     LLM_FUNCTION_EXTRACT_RESPONSE,
+    STAGED_TEXT_MODEL_PREFIX,
     LLM_FUNCTION_EXTRACT_RFI,
     LLM_RESPONSE_OUTPUT_ARTIFACT,
     LLM_RFI_OUTPUT_ARTIFACT,
@@ -656,7 +657,8 @@ def run_llm_job_validated(
     persisted state machine instead so every step checkpoints.
     """
     text_model = _stage_text_model(
-        istari, model_id, display_name=f"extracted-text-{model_id}",
+        istari, model_id,
+        display_name=f"{STAGED_TEXT_MODEL_PREFIX}{model_id}",
         do_custom_extraction=do_custom_extraction, revision_id=revision_id, log=log,
     )
     errors: list[str] | None = None
@@ -887,30 +889,6 @@ def _log(log: LogCallback | None, message: str) -> None:
         log(message)
 
 
-def resolve_response_revisions(
-    istari: IstariClient, revision_ids: list[str]
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolve each user-entered response revision id to its owning model id
-    (Stage 2 now takes a specific file revision, not a model UUID, so a
-    response can be ingested against an exact historical revision rather
-    than always whatever is currently latest). One bad id must not lose the
-    rest of a batch, so failures are collected rather than raised.
-
-    Returns ``(resolved, failed)`` — ``resolved`` as ``(revision_id,
-    model_id)`` pairs, ``failed`` as ``(revision_id, reason)`` pairs.
-    """
-    resolved: list[tuple[str, str]] = []
-    failed: list[tuple[str, str]] = []
-    for revision_id in revision_ids:
-        try:
-            model_id = istari.model_id_for_revision(revision_id)
-        except IstariError as e:
-            failed.append((revision_id, str(e)))
-            continue
-        resolved.append((revision_id, model_id))
-    return resolved, failed
-
-
 def find_existing_answers(
     istari: IstariClient,
     response_uuid: str,
@@ -1091,7 +1069,8 @@ def process_response(
             elif record.state is PipelineState.TEXT_RETRIEVED:
                 _notify(progress, "llm", record.uuid)
                 text_model = _stage_text_model(
-                    istari, record.uuid, display_name=f"extracted-text-{record.uuid}",
+                    istari, record.uuid,
+                    display_name=f"{STAGED_TEXT_MODEL_PREFIX}{record.uuid}",
                     do_custom_extraction=do_custom_extraction, revision_id=record.revision,
                     log=log,
                 )

@@ -196,3 +196,51 @@ NOT done (deliberately — PO decision, after schema is buttoned down):
   is the designed pre-module-deploy behavior (rollout step 2 of 4).
 
 Blocked: nothing.
+
+## 2026-08-21 — System-based file selection (branch system-level-management)
+
+Feature spec: docs/SYSTEM_SELECTION.md (PO decisions recorded there: branch
+dropdown in UI; manual UUID/revision entry REPLACED; batch stays sequential).
+Goal: practical bulk handling of 100+ RFI responses grouped into an Istari
+System.
+
+Done (all work items):
+- PRD: FR1/FR4 rewritten for system-based selection; §3.6a project file
+  gains optional system_uuid/system_branch.
+- istari_adapter.py: BranchInfo/SystemFileInfo + list_system_branches
+  (get_system -> System.list_branches) and list_system_files (get_branch ->
+  list_branch_revisions). The listing yields (revision_id, resource_id)
+  pairs directly — Stage 2 needs NO per-response revision resolution
+  (~100 API round-trips saved per batch) and ingests the branch-snapshot
+  revision, so the FR5 idempotency key cannot drift mid-batch.
+- stage1_page.py: System UUID + Load System -> branch dropdown (defaults to
+  "main" when present) -> RFI file dropdown; extract emits the selected
+  resource id + branch-pinned revision.
+- stage2_page.py: checkable response list, all checked by default; RFI entry
+  unchecked/disabled/greyed "(RFI — cannot be a response)"; Select All/None;
+  N-of-M count label. ingest_requested now emits (revision_id, resource_id)
+  pairs.
+- main_window.py: load_system/load_system_files workers; system pointer
+  stamped into the project at commit; RFI re-greyed in the picker once the
+  project exists; pickers repopulated on project open from the stored
+  pointer; start_ingest takes pairs and hard-filters the RFI id
+  (belt-and-suspenders under the picker's grey-out).
+- models.py: Project.system_uuid/system_branch, optional — pre-system
+  .rfiproj files load with both None (tested).
+- pipeline.py: resolve_response_revisions REMOVED (dead after manual entry
+  replacement — the system listing pre-resolves pairs).
+- Interruption-safety machinery UNTOUCHED (confirmed with PO): rfi-answers
+  artifacts on response models, state machine, FR5/FR11, atomic .rfiproj.
+- Tests: 176 passed (conformance now pins the 2 new adapter methods; fake
+  system flow + error tests; project round-trip incl. system fields +
+  missing-fields backcompat). ui_smoke reworked: scenario 1 drives the
+  system pickers end to end, scenario 2 asserts the RFI grey-out +
+  all-checked default, scenario 6 covers the RFI-as-response hard filter.
+
+Live-verification items (first live run, human step):
+- Default branch name in list_branches() for a UI-created system ("main"?);
+  whether the baseline needs to be offered as a fallback dropdown entry.
+- SnapshotRevisionSearchItem field population (resource_id/display_name) on
+  a real system with 100+ files; listing latency at that scale.
+
+Blocked: nothing.

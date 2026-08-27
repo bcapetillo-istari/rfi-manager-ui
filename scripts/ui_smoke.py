@@ -73,9 +73,16 @@ def main() -> None:
     pump(app, lambda: win.llm_cred_combo.count() == 2, "credentials")
     print("0. connection bar (guard, connect, credentials load): OK")
 
-    # ---- 1. Stage 1 + review edits + commit (FR1/FR2)
+    # ---- 1. Stage 1 via system pickers + review edits + commit (FR1/FR2)
+    system_id = istari.add_system([rfi.model_id, ra.model_id, rb.model_id])
+    win.stage1_page.system_edit.setText(system_id)
+    win.stage1_page._on_load_system()
+    pump(app, lambda: win.stage1_page.file_combo.count() == 3, "system files listed")
+    assert win.stage1_page.branch_combo.currentText() == "main"
+    win.stage1_page.file_combo.setCurrentIndex(0)  # the RFI
+    assert win.stage1_page.extract_button.isEnabled()
     istari.queue_llm_output(REQS)
-    win.start_extraction(rfi.model_id, "")
+    win.stage1_page._on_extract()
     pump(app, lambda: win._stack.currentWidget() is win.review_screen, "review screen")
     win.review_screen._add_row()
     app.processEvents()
@@ -86,13 +93,25 @@ def main() -> None:
     assert win.review_screen.commit_button.isEnabled(), "commit not re-enabled"
     win.review_screen._on_commit()
     pump(app, lambda: win.project and win.project.schema_version == "1.0", "commit v1.0")
-    print("1. stage1 + review edit + commit: OK")
+    assert win.project.system_uuid == system_id, "system pointer not stamped"
+    assert win.project.system_branch == "main"
+    print("1. stage1 via system pickers + review edit + commit: OK")
 
-    # ---- 2. Mixed batch: one good, one failing validation twice (FR4, §4 retry-once)
+    # ---- 2. Mixed batch via the response checklist: one good, one failing
+    # validation twice (FR4, §4 retry-once). All entries checked by default;
+    # the RFI's own entry is greyed out and unselectable.
+    rfi_item = win.stage2_page.file_list.item(0)
+    assert "(RFI — cannot be a response)" in rfi_item.text()
+    assert not rfi_item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert win.stage2_page.selected_pairs() == [
+        (ra.latest_revision_id, ra.model_id),
+        (rb.latest_revision_id, rb.model_id),
+    ], "responses should default to all-checked, minus the RFI"
+    assert "2 of 2 selected" in win.stage2_page.count_label.text()
     istari.queue_llm_output(ans("Compliant", 38.5))
     istari.queue_llm_output("garbage")
     istari.queue_llm_output("garbage again")
-    win.start_ingest([ra.latest_revision_id, rb.latest_revision_id], False)
+    win.stage2_page._on_ingest()
     pump(app, lambda: win.project.response_for(rb.model_id)
          and win.project.response_for(rb.model_id).state is PipelineState.FAILED
          and win.project.response_for(ra.model_id).state is PipelineState.DONE,
@@ -165,19 +184,26 @@ def main() -> None:
     # ---- 6. Re-ingest under v1.1; FR5 idempotent skip; FR12 rebuild
     istari.queue_llm_output(ans("Compliant", 38.5))
     istari.queue_llm_output(ans("Partial", 41.0, "low"))
-    win2.start_ingest([ra.latest_revision_id, rb.latest_revision_id], False)
+    ra_pair = (ra.latest_revision_id, ra.model_id)
+    rb_pair = (rb.latest_revision_id, rb.model_id)
+    win2.start_ingest([ra_pair, rb_pair], False)
     pump(app, lambda: all(r.state is PipelineState.DONE and r.schema_version == "1.1"
                           for r in win2.project.responses), "re-ingest v1.1")
     llm_calls_before = len(istari.llm_calls)
-    win2.start_ingest([ra.latest_revision_id], False)
+    win2.start_ingest([ra_pair], False)
     pump(app, lambda: win2.project.response_for(ra.model_id).state
          is PipelineState.DONE, "skip")
     app.processEvents(); time.sleep(0.1); app.processEvents()
     assert len(istari.llm_calls) == llm_calls_before, "FR5 skip submitted an LLM job"
 
+    # the RFI can never be ingested as a response, even by a direct call
+    win2.start_ingest([(rfi.latest_revision_id, rfi.model_id)], False)
+    app.processEvents(); time.sleep(0.05); app.processEvents()
+    assert win2.project.response_for(rfi.model_id) is None, "RFI ingested as response"
+
     # force re-extract on a DONE record must actually re-run (FR5 bypass)
     istari.queue_llm_output(ans("Compliant", 39.0))
-    win2.start_ingest([ra.latest_revision_id], True)
+    win2.start_ingest([ra_pair], True)
     pump(app, lambda: len(istari.llm_calls) == llm_calls_before + 1
          and win2.project.response_for(ra.model_id).state is PipelineState.DONE,
          "force re-extract re-ran")

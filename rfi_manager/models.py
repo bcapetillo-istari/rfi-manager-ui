@@ -356,6 +356,11 @@ class Project:
 
     rfi_uuid: str
     rfi_revision: str | None = None
+    # source system + branch for the selection pickers (docs/
+    # SYSTEM_SELECTION.md); optional — pre-system project files load with
+    # both None and just need the system id re-entered.
+    system_uuid: str | None = None
+    system_branch: str | None = None
     requirements_artifact_uuid: str | None = None
     # extra pointer beyond PRD §3.6a's minimum: the artifact's revision id,
     # needed as the traversal root for rebuild links (§3.6c). Recoverable
@@ -375,6 +380,8 @@ class Project:
             "format_version": self.FORMAT_VERSION,
             "rfi_uuid": self.rfi_uuid,
             "rfi_revision": self.rfi_revision,
+            "system_uuid": self.system_uuid,
+            "system_branch": self.system_branch,
             "requirements_artifact_uuid": self.requirements_artifact_uuid,
             "requirements_artifact_revision": self.requirements_artifact_revision,
             "schema_version": self.schema_version,
@@ -389,6 +396,8 @@ class Project:
         return cls(
             rfi_uuid=d["rfi_uuid"],
             rfi_revision=d.get("rfi_revision"),
+            system_uuid=d.get("system_uuid"),
+            system_branch=d.get("system_branch"),
             requirements_artifact_uuid=d.get("requirements_artifact_uuid"),
             requirements_artifact_revision=d.get("requirements_artifact_revision"),
             schema_version=d.get("schema_version"),

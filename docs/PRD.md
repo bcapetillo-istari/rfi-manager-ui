@@ -77,9 +77,11 @@ static HTML uploaded to Istari).
    the adapter against what exists; keep ALL such calls inside istari_adapter.py.
 6. Persistence & crash recovery — three tiers, platform is source of truth:
    a. Project file (index/cache only): one JSON file per RFI (`<name>.rfiproj`)
-      holding: RFI UUID + revision, committed requirements artifact UUID +
-      schema_version, and per response: UUID, revision, pipeline state,
-      Istari job id (when submitted), answers artifact UUID (when uploaded).
+      holding: RFI UUID + revision, source system UUID + branch name (for
+      repopulating the selection pickers; optional — old files load without
+      them), committed requirements artifact UUID + schema_version, and per
+      response: UUID, revision, pipeline state, Istari job id (when
+      submitted), answers artifact UUID (when uploaded).
       Written at EVERY state transition (never only on exit), atomically
       (write temp file, fsync, rename). Format has a version field.
       Table content is NOT stored here — it is re-fetched from Istari on load.
@@ -167,8 +169,12 @@ when set; llm_grade on a non-text requirement is a warning (deterministic
 grading wins; see docs/T-O_COMPLIANCE.md precedence rule).
 
 ## 5. Functional requirements
-FR1  Stage 1 UI: UUID (+ optional revision) input; "Extract requirements" button;
-     progress states visible; on LLM return, open review screen.
+FR1  Stage 1 UI (system-based selection, docs/SYSTEM_SELECTION.md): System
+     UUID input + "Load System" button -> branch dropdown (list_branches) ->
+     file dropdown of the branch's tracked files; the user selects the RFI
+     file from the dropdown. "Extract requirements" button; progress states
+     visible; on LLM return, open review screen. Extraction runs against the
+     selected file's resource id at the branch-pinned revision.
 FR2  Review screen: editable table of requirements (id, label, description, type,
      unit, options, required); add/delete/reorder rows; inline validation
      (duplicate ids, enum without options, numeric without unit warning);
@@ -177,8 +183,14 @@ FR2  Review screen: editable table of requirements (id, label, description, type
 FR3  Re-running Stage 1 with a committed schema warns and, on confirm, commits a
      new artifact with bumped schema_version. Existing response rows keep their
      original schema_version stamp and are flagged stale in the table.
-FR4  Stage 2 UI: single-UUID field plus batch box (one UUID per line);
-     per-response status list; failures show reason and a retry action.
+FR4  Stage 2 UI (system-based selection, docs/SYSTEM_SELECTION.md): checkable
+     list of the system branch's files, all checked by default; the RFI's own
+     entry (resource_id == project.rfi_uuid) is unchecked, disabled, and
+     greyed so it cannot be ingested as a response. Select All/None controls
+     and a selected-count label. Ingest feeds the checked entries'
+     (revision_id, resource_id) pairs — the branch-snapshot revision, not
+     "latest" — into the batch. Per-response status list; failures show
+     reason and a retry action.
 FR5  Idempotency: before processing a response, check the project file (and,
      if cheaply possible via the SDK, existing linked artifacts) for an
      answers artifact matching (response revision, schema_version); if found,

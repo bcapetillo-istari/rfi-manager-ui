@@ -1,17 +1,19 @@
-"""Stage 2 page (FR4): single-UUID field plus batch box (one UUID per line),
-per-response status list, failure reasons with a retry action, and a
+"""Stage 2 page (FR4, docs/SYSTEM_SELECTION.md): checkable list of the
+system branch's files (all checked by default; the RFI's own entry greyed
+out so it cannot be ingested as a response), Select All/None, selected-count
+label, per-response status list, failure reasons with a retry action, and a
 "Force re-extract" toggle (FR5)."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
-    QPlainTextEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -19,16 +21,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..istari_adapter import SystemFileInfo
+
 _COLUMNS = ["Response UUID", "State", "Detail"]
 
 
 class Stage2Page(QWidget):
-    ingest_requested = Signal(list, bool)  # (revision_ids, force)
+    # list of (revision_id, resource_id) pairs — pre-resolved by the system
+    # listing, so no per-response revision resolution is needed
+    ingest_requested = Signal(list, bool)  # (pairs, force)
     retry_requested = Signal(str)  # response uuid (model id)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._busy = False
+        self._rfi_resource_id: str | None = None
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
@@ -36,22 +43,31 @@ class Stage2Page(QWidget):
         title.setProperty("role", "section")
         layout.addWidget(title)
         hint = QLabel(
-            "Enter one or more response file revision UUIDs to extract "
-            "answers against the committed requirements schema."
+            "Select which of the system's files are vendor responses, then "
+            "extract answers against the committed requirements schema. The "
+            "RFI itself cannot be selected."
         )
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        layout.addWidget(QLabel("Response Revision UUID"))
-        self.single_edit = QLineEdit()
-        self.single_edit.setPlaceholderText("Istari Revision UUID of one response PDF")
-        layout.addWidget(self.single_edit)
+        self.file_list = QListWidget()
+        self.file_list.itemChanged.connect(lambda _item: self._update_count())
+        layout.addWidget(self.file_list)
 
-        layout.addWidget(QLabel("Batch (one Revision UUID per line)"))
-        self.batch_edit = QPlainTextEdit()
-        self.batch_edit.setMaximumHeight(90)
-        layout.addWidget(self.batch_edit)
+        select_row = QHBoxLayout()
+        select_row.setSpacing(8)
+        self.select_all_button = QPushButton("Select All")
+        self.select_all_button.clicked.connect(lambda: self._set_all(True))
+        select_row.addWidget(self.select_all_button)
+        self.select_none_button = QPushButton("Select None")
+        self.select_none_button.clicked.connect(lambda: self._set_all(False))
+        select_row.addWidget(self.select_none_button)
+        self.count_label = QLabel("0 of 0 selected")
+        self.count_label.setProperty("role", "hint")
+        select_row.addWidget(self.count_label)
+        select_row.addStretch(1)
+        layout.addLayout(select_row)
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
@@ -81,22 +97,74 @@ class Stage2Page(QWidget):
         self.status_table.itemSelectionChanged.connect(self._on_selection)
         layout.addWidget(self.status_table)
 
+    # ---------------------------------------------------------- file list
+
+    def set_files(
+        self, files: list[SystemFileInfo], rfi_resource_id: str | None
+    ) -> None:
+        """Populate the response picker from the system listing: everything
+        checked by default EXCEPT the RFI's own entry, which is unchecked,
+        disabled, and greyed so it cannot be ingested as a response."""
+        self._rfi_resource_id = rfi_resource_id
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        # only Models are ingestable — same filter as the Stage 1 RFI picker
+        # (screens out artifacts and the pipeline's staged-text models)
+        files = [f for f in files if f.is_selectable]
+        for f in files:
+            item = QListWidgetItem(f.name)
+            item.setData(Qt.ItemDataRole.UserRole, f)
+            if f.resource_id == rfi_resource_id:
+                item.setText(f"{f.name}  (RFI — cannot be a response)")
+                item.setFlags(Qt.ItemFlag.NoItemFlags)  # disabled + greyed
+                item.setCheckState(Qt.CheckState.Unchecked)
+            else:
+                item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                item.setCheckState(Qt.CheckState.Checked)
+            self.file_list.addItem(item)
+        self.file_list.blockSignals(False)
+        self._update_count()
+
+    def _selectable_items(self) -> list[QListWidgetItem]:
+        return [
+            self.file_list.item(i)
+            for i in range(self.file_list.count())
+            if self.file_list.item(i).flags() & Qt.ItemFlag.ItemIsUserCheckable
+        ]
+
+    def _set_all(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.file_list.blockSignals(True)
+        for item in self._selectable_items():
+            item.setCheckState(state)
+        self.file_list.blockSignals(False)
+        self._update_count()
+
+    def selected_pairs(self) -> list[tuple[str, str]]:
+        """The checked entries as (revision_id, resource_id) pairs."""
+        pairs = []
+        for item in self._selectable_items():
+            if item.checkState() is Qt.CheckState.Checked:
+                info: SystemFileInfo = item.data(Qt.ItemDataRole.UserRole)
+                pairs.append((info.revision_id, info.resource_id))
+        return pairs
+
+    def _update_count(self) -> None:
+        selectable = self._selectable_items()
+        selected = sum(
+            1 for i in selectable if i.checkState() is Qt.CheckState.Checked
+        )
+        self.count_label.setText(f"{selected} of {len(selectable)} selected")
+        self.ingest_button.setEnabled(not self._busy and selected > 0)
+
     # -------------------------------------------------------------- input
 
-    def _collect_revision_ids(self) -> list[str]:
-        revision_ids = []
-        if self.single_edit.text().strip():
-            revision_ids.append(self.single_edit.text().strip())
-        for line in self.batch_edit.toPlainText().splitlines():
-            if line.strip():
-                revision_ids.append(line.strip())
-        seen: set[str] = set()
-        return [r for r in revision_ids if not (r in seen or seen.add(r))]
-
     def _on_ingest(self) -> None:
-        revision_ids = self._collect_revision_ids()
-        if revision_ids:
-            self.ingest_requested.emit(revision_ids, self.force_check.isChecked())
+        pairs = self.selected_pairs()
+        if pairs:
+            self.ingest_requested.emit(pairs, self.force_check.isChecked())
 
     def _on_retry(self) -> None:
         row = self.status_table.currentRow()
@@ -118,7 +186,7 @@ class Stage2Page(QWidget):
         """While a batch runs, neither a new ingest nor a retry may start —
         both would spawn a second worker mutating the same project."""
         self._busy = busy
-        self.ingest_button.setEnabled(not busy)
+        self._update_count()
         self._on_selection()
 
     def _row_for(self, uuid: str) -> int:

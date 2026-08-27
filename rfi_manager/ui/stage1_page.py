@@ -1,12 +1,15 @@
-"""Stage 1 page (FR1): RFI UUID (+ optional revision) input, "Extract
-requirements" button, visible progress states. Dispatches to a Worker; on LLM
-return the main window opens the review screen."""
+"""Stage 1 page (FR1, docs/SYSTEM_SELECTION.md): System UUID input ->
+branch dropdown -> RFI file dropdown -> "Extract requirements" button with
+visible progress states. All platform listing happens in the main window's
+Workers; this page only renders results and emits selections."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -14,9 +17,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..istari_adapter import BranchInfo, SystemFileInfo
+
 
 class Stage1Page(QWidget):
-    extract_requested = Signal(str, str)  # (rfi_uuid, revision_id-or-empty)
+    load_system_requested = Signal(str)  # system uuid
+    branch_selected = Signal(str, str)  # (system uuid, branch name)
+    extract_requested = Signal(str, str)  # (rfi resource id, revision_id-or-empty)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -27,7 +34,8 @@ class Stage1Page(QWidget):
         title.setProperty("role", "section")
         layout.addWidget(title)
         hint = QLabel(
-            "Enter the RFI document's Istari UUID, then extract its "
+            "Enter the Istari System containing the RFI and its responses, "
+            "pick a branch, then select the RFI file and extract its "
             "requirements schema with an LLM job."
         )
         hint.setProperty("role", "hint")
@@ -36,16 +44,30 @@ class Stage1Page(QWidget):
 
         form = QFormLayout()
         form.setSpacing(8)
-        self.uuid_edit = QLineEdit()
-        self.uuid_edit.setPlaceholderText("Istari UUID of the RFI file")
-        self.revision_edit = QLineEdit()
-        self.revision_edit.setPlaceholderText("Optional — uses the latest revision if empty")
-        form.addRow("RFI Document UUID", self.uuid_edit)
-        form.addRow("Revision (optional)", self.revision_edit)
+        system_row = QHBoxLayout()
+        system_row.setSpacing(8)
+        self.system_edit = QLineEdit()
+        self.system_edit.setPlaceholderText("Istari UUID of the RFI System")
+        system_row.addWidget(self.system_edit)
+        self.load_button = QPushButton("Load System")
+        self.load_button.clicked.connect(self._on_load_system)
+        system_row.addWidget(self.load_button)
+        form.addRow("RFI System UUID", system_row)
+
+        self.branch_combo = QComboBox()
+        self.branch_combo.setEnabled(False)
+        self.branch_combo.currentTextChanged.connect(self._on_branch_changed)
+        form.addRow("Branch", self.branch_combo)
+
+        self.file_combo = QComboBox()
+        self.file_combo.setEnabled(False)
+        self.file_combo.currentIndexChanged.connect(lambda _i: self._update_buttons())
+        form.addRow("RFI File", self.file_combo)
         layout.addLayout(form)
 
         self.extract_button = QPushButton("Extract Requirements")
         self.extract_button.setObjectName("primaryButton")
+        self.extract_button.setEnabled(False)
         self.extract_button.clicked.connect(self._on_extract)
         layout.addWidget(self.extract_button)
 
@@ -54,15 +76,92 @@ class Stage1Page(QWidget):
         layout.addWidget(self.status_label)
         layout.addStretch(1)
 
-    def _on_extract(self) -> None:
-        rfi_uuid = self.uuid_edit.text().strip()
-        if not rfi_uuid:
-            self.status_label.setText("Enter an RFI UUID first.")
+        self._busy = False
+
+    # -------------------------------------------------------------- events
+
+    def _on_load_system(self) -> None:
+        system_id = self.system_edit.text().strip()
+        if not system_id:
+            self.status_label.setText("Enter a System UUID first.")
             return
-        self.extract_requested.emit(rfi_uuid, self.revision_edit.text().strip())
+        self.load_system_requested.emit(system_id)
+
+    def _on_branch_changed(self, branch_name: str) -> None:
+        # a programmatic clear() also fires with "" — ignore it
+        if branch_name and self.branch_combo.isEnabled():
+            self.branch_selected.emit(self.system_edit.text().strip(), branch_name)
+
+    def _on_extract(self) -> None:
+        info = self.file_combo.currentData()
+        if info is None:
+            self.status_label.setText("Select the RFI file first.")
+            return
+        # the branch-pinned revision rides along so extraction provenance
+        # matches what the system snapshot tracks, not "latest"
+        self.extract_requested.emit(info.resource_id, info.revision_id)
+
+    # ----------------------------------------------------------- populate
+
+    def set_branches(self, branches: list[BranchInfo]) -> None:
+        self.branch_combo.blockSignals(True)
+        self.branch_combo.clear()
+        for branch in branches:
+            self.branch_combo.addItem(branch.name)
+        self.branch_combo.blockSignals(False)
+        self.branch_combo.setEnabled(bool(branches))
+        self.file_combo.clear()
+        self.file_combo.setEnabled(False)
+        if not branches:
+            self.status_label.setText("System has no branches.")
+            self._update_buttons()
+            return
+        # default to "main" when present, else the first branch
+        index = max(self.branch_combo.findText("main"), 0)
+        self.branch_combo.setCurrentIndex(index)
+        # fire the initial listing explicitly — setCurrentIndex(0) after a
+        # clear() does not emit currentTextChanged
+        self.branch_selected.emit(
+            self.system_edit.text().strip(), self.branch_combo.currentText()
+        )
+        self._update_buttons()
+
+    def set_files(self, files: list[SystemFileInfo]) -> None:
+        self.file_combo.blockSignals(True)
+        self.file_combo.clear()
+
+        files = self._filter_files(files)
+
+        for f in files:
+            self.file_combo.addItem(f.name, f)  # item data: SystemFileInfo
+        self.file_combo.blockSignals(False)
+        self.file_combo.setEnabled(bool(files))
+        if not files:
+            self.status_label.setText("Branch tracks no files.")
+        self._update_buttons()
+
+    def _filter_files(self, files: list[SystemFileInfo]) -> list[SystemFileInfo]:
+        """Only Models are selectable — the pipeline can't run on artifacts,
+        comments, or other tracked resource types — and the pipeline's own
+        staged-text plumbing models are screened out too."""
+        return [f for f in files if f.is_selectable]
+
+    def selected_branch(self) -> str:
+        return self.branch_combo.currentText()
+
+    # -------------------------------------------------------------- state
+
+    def _update_buttons(self) -> None:
+        self.load_button.setEnabled(not self._busy)
+        self.extract_button.setEnabled(
+            not self._busy
+            and self.file_combo.isEnabled()
+            and self.file_combo.currentData() is not None
+        )
 
     def set_busy(self, busy: bool) -> None:
-        self.extract_button.setEnabled(not busy)
+        self._busy = busy
+        self._update_buttons()
 
     def show_progress(self, state: str, detail: str) -> None:
         self.status_label.setText(f"[{state}] {detail}")
