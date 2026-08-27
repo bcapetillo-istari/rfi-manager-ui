@@ -79,6 +79,12 @@ def main() -> None:
     win.stage1_page._on_load_system()
     pump(app, lambda: win.stage1_page.file_combo.count() == 3, "system files listed")
     assert win.stage1_page.branch_combo.currentText() == "main"
+    # baseline is always offered, after the user branches
+    assert [win.stage1_page.branch_combo.itemText(i)
+            for i in range(win.stage1_page.branch_combo.count())] == ["main", "baseline"]
+    # loading spinners cleared once the listing landed
+    assert win.stage1_page.file_loading.isHidden()
+    assert win.stage2_page.file_loading.isHidden()
     win.stage1_page.file_combo.setCurrentIndex(0)  # the RFI
     assert win.stage1_page.extract_button.isEnabled()
     istari.queue_llm_output(REQS)
@@ -287,6 +293,35 @@ def main() -> None:
     errors, _warnings = screen.validate()
     assert not errors, errors
     print("10. review screen T/O round-trip without data loss: OK")
+
+    # ---- 11. Branch-switch loading state: pickers cleared + spinners shown
+    # while files load, so stale entries can't be selected mid-fetch
+    from rfi_manager.ui.stage1_page import Stage1Page
+    from rfi_manager.ui.stage2_page import Stage2Page
+
+    s1, s2 = Stage1Page(), Stage2Page()
+    s1.set_files_loading()
+    assert not s1.file_loading.isHidden()
+    assert s1.file_combo.count() == 0 and not s1.file_combo.isEnabled()
+    assert not s1.extract_button.isEnabled()
+    s2.set_files_loading()
+    assert not s2.file_loading.isHidden()
+    assert s2.file_list.count() == 0 and not s2.ingest_button.isEnabled()
+    assert "Loading" in s2.count_label.text()
+    # listing lands -> spinners hidden, pickers usable again
+    files = istari.list_system_files(system_id, "main")
+    s1.set_files(files)
+    s2.set_files(files, rfi.model_id)
+    assert s1.file_loading.isHidden() and s1.file_combo.isEnabled()
+    assert s2.file_loading.isHidden() and s2.ingest_button.isEnabled()
+    # a superseded listing must be dropped (rapid branch switching)
+    win.load_system_files(system_id, "main")
+    stale_token = win._file_load_token
+    win.load_system_files(system_id, "main")  # newer request supersedes
+    win._on_system_files_listed("stale-branch", [], stale_token)
+    assert win._system_branch != "stale-branch", "stale listing overwrote newer one"
+    pump(app, lambda: win.stage1_page.file_combo.count() == 3, "latest listing lands")
+    print("11. branch-switch loading spinners + stale-listing guard: OK")
 
     print("ALL EXTENDED UI CHECKS PASSED")
 

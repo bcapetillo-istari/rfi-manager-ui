@@ -116,6 +116,10 @@ class MainWindow(QMainWindow):
         self._system_uuid: str | None = None
         self._system_branch: str | None = None
         self._system_files: list = []  # last listing, for re-greying the RFI
+        # monotonically increasing token: only the LATEST file-listing worker
+        # may populate the pickers (rapid branch switches must not let a slow
+        # older listing overwrite a newer one)
+        self._file_load_token = 0
 
         self.stage1_page = Stage1Page()
         self.review_screen = ReviewScreen()
@@ -408,20 +412,41 @@ class MainWindow(QMainWindow):
 
     def load_system_files(self, system_id: str, branch_name: str) -> None:
         """List a branch's tracked files for both pickers: the Stage 1 RFI
-        dropdown and the Stage 2 response checklist."""
+        dropdown and the Stage 2 response checklist. Both pickers show a
+        loading spinner (and are cleared) until THIS listing lands — stale
+        entries must not be selectable, and a superseded listing is dropped."""
         istari = self._require_connection()
         if istari is None:
             return
+        self._file_load_token += 1
+        token = self._file_load_token
+        self.stage1_page.set_files_loading()
+        self.stage2_page.set_files_loading()
         worker = Worker(istari.list_system_files, system_id, branch_name)
         worker.signals.finished.connect(
-            lambda files, b=branch_name: self._on_system_files_listed(b, files)
+            lambda files, b=branch_name, t=token: self._on_system_files_listed(
+                b, files, t
+            )
         )
         worker.signals.failed.connect(
-            lambda reason: QMessageBox.critical(self, "Load files failed", reason)
+            lambda reason, t=token: self._on_system_files_failed(reason, t)
         )
         self._spawn(worker)
 
-    def _on_system_files_listed(self, branch_name: str, files: list) -> None:
+    def _on_system_files_failed(self, reason: str, token: int) -> None:
+        if token != self._file_load_token:
+            return  # a newer listing is already in flight; keep its spinner
+        # clear the loading state — empty pickers, spinners hidden
+        self.stage1_page.set_files([])
+        self.stage2_page.set_files([], self.project.rfi_uuid if self.project else None)
+        QMessageBox.critical(self, "Load files failed", reason)
+
+    def _on_system_files_listed(
+        self, branch_name: str, files: list, token: int
+    ) -> None:
+        if token != self._file_load_token:
+            self.log(f"branch {branch_name!r}: listing superseded; dropped")
+            return
         self._system_branch = branch_name
         self._system_files = files
         self.log(f"branch {branch_name!r}: {len(files)} file(s)")

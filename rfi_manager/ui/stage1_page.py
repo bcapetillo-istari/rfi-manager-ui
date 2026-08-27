@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -63,6 +64,15 @@ class Stage1Page(QWidget):
         self.file_combo.setEnabled(False)
         self.file_combo.currentIndexChanged.connect(lambda _i: self._update_buttons())
         form.addRow("RFI File", self.file_combo)
+
+        # indeterminate spinner shown while a branch's files are loading, so
+        # stale entries can't be picked before the new listing lands
+        self.file_loading = QProgressBar()
+        self.file_loading.setRange(0, 0)
+        self.file_loading.setTextVisible(False)
+        self.file_loading.setMaximumHeight(8)
+        self.file_loading.hide()
+        form.addRow("", self.file_loading)
         layout.addLayout(form)
 
         self.extract_button = QPushButton("Extract Requirements")
@@ -126,7 +136,19 @@ class Stage1Page(QWidget):
         )
         self._update_buttons()
 
+    def set_files_loading(self) -> None:
+        """Branch files are being fetched: clear + disable the picker so a
+        stale entry can't be selected, and show the spinner."""
+        self.file_combo.blockSignals(True)
+        self.file_combo.clear()
+        self.file_combo.blockSignals(False)
+        self.file_combo.setEnabled(False)
+        self.file_loading.show()
+        self.status_label.setText("Loading branch files…")
+        self._update_buttons()
+
     def set_files(self, files: list[SystemFileInfo]) -> None:
+        self.file_loading.hide()
         self.file_combo.blockSignals(True)
         self.file_combo.clear()
 

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -51,6 +52,15 @@ class Stage2Page(QWidget):
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        # indeterminate spinner shown while a branch's files are loading, so
+        # stale entries can't be checked/ingested before the new listing lands
+        self.file_loading = QProgressBar()
+        self.file_loading.setRange(0, 0)
+        self.file_loading.setTextVisible(False)
+        self.file_loading.setMaximumHeight(8)
+        self.file_loading.hide()
+        layout.addWidget(self.file_loading)
 
         self.file_list = QListWidget()
         self.file_list.itemChanged.connect(lambda _item: self._update_count())
@@ -100,6 +110,16 @@ class Stage2Page(QWidget):
 
     # ---------------------------------------------------------- file list
 
+    def set_files_loading(self) -> None:
+        """Branch files are being fetched: clear + disable the checklist so
+        stale entries can't be checked/ingested, and show the spinner."""
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        self.file_list.blockSignals(False)
+        self.file_loading.show()
+        self.count_label.setText("Loading branch files…")
+        self.ingest_button.setEnabled(False)
+
     def set_files(
         self, files: list[SystemFileInfo], rfi_resource_id: str | None
     ) -> None:
@@ -107,6 +127,7 @@ class Stage2Page(QWidget):
         checked by default EXCEPT the RFI's own entry, which is unchecked,
         disabled, and greyed so it cannot be ingested as a response."""
         self._rfi_resource_id = rfi_resource_id
+        self.file_loading.hide()
         self.file_list.blockSignals(True)
         self.file_list.clear()
         # only Models are ingestable — same filter as the Stage 1 RFI picker

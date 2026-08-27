@@ -358,10 +358,14 @@ class IstariAdapter:
                 page_num += 1
         except Exception as e:
             raise IstariError(f"cannot list branches of system {system_id}: {e}") from e
-        ordered = [t for t in tags if not t.is_baseline] + [t for t in tags if t.is_baseline]
+        ordered = [t for t in tags if not t.is_baseline] + [
+            t for t in tags if t.is_baseline
+        ]
         return [BranchInfo(name=t.tag, snapshot_id=t.snapshot_id) for t in ordered]
 
-    def list_system_files(self, system_id: str, branch_name: str) -> list[SystemFileInfo]:
+    def list_system_files(
+        self, system_id: str, branch_name: str
+    ) -> list[SystemFileInfo]:
         """``client.get_system(system_id)`` -> ``System.get_branch(branch_name)``
         -> ``System.list_branch_revisions(branch)`` -> SystemFileInfo per
         tracked file (docs/SYSTEM_SELECTION.md). Internally paginated by the
