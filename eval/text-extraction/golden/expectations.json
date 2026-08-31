@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "Per-golden expectations (EVAL_FRAMEWORK_PRD match_rules). Reviewed like",
+    "any golden change — never edited to make a red run green without review.",
+    "known_absent_ids: schema requirement ids that do NOT appear literally in",
+    "this document. Meridian's PDF labels BOTH 'Mission Planning' and",
+    "'On-board Processing' rows as '1.12'; the schema id '1.12b' is the",
+    "requirements extraction's disambiguation and exists only schema-side.",
+    "These are strict xfails: if the id ever DOES appear, the eval fails to",
+    "flag golden drift."
+  ],
+  "known_absent_ids": [
+    "1.12b"
+  ]
+}

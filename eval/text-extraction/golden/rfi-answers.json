@@ -1,0 +1,441 @@
+{
+    "response_uuid": "7a7a5041-fb35-4ddc-b99a-1af1babf1dba",
+    "response_revision": "2b700b59-78d3-4bbc-a70f-0725313ac9f9",
+    "vendor": "RFI_Response_A_Meridian_Aerosystems",
+    "schema_version": "1.2",
+    "extracted_at": "2026-08-21T19:28:22.333904+00:00",
+    "llm_model": "gemini:gemini-3.6-flash",
+    "prompt_version": "@istari_utils:extract_response_requirements+schema-1.2",
+    "answers": [
+        {
+            "id": "1.1",
+            "value": 1650,
+            "unit": "km",
+            "quote": "1,650 km from L/R location to collection area (exceeds objective of 1,500 km).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "1.2",
+            "value": 22,
+            "unit": "hrs",
+            "quote": "22 hours on station at 10,000 ft MSL, excluding ingress/egress (exceeds 20 hr objective).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "1.3",
+            "value": "Operational ceiling 24,000 ft MSL; typical ISR cruise 12,000-18,000 ft MSL.",
+            "unit": null,
+            "quote": "Operational ceiling 24,000 ft MSL; typical ISR cruise 12,000-18,000 ft MSL.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "1.4",
+            "value": "1,150 ft/min at max gross weight, sea level standard day.",
+            "unit": null,
+            "quote": "1,150 ft/min at max gross weight, sea level standard day.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "1.5",
+            "value": "128 KTAS dash; 74 KTAS loiter speed.",
+            "unit": null,
+            "quote": "128 KTAS dash; 74 KTAS loiter speed.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "1.6",
+            "value": "Certified for operations in rain up to 25 mm/hr, winds to 30 kt sustained / 40 kt gusts, temperatures -34C to +49C.",
+            "unit": null,
+            "quote": "Certified for operations in rain up to 25 mm/hr, winds to 30 kt sustained / 40 kt gusts, temperatures -34C to +49C.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor provided detailed weather and environmental performance certifications across rain, wind, and temperature conditions, meeting the objective."
+        },
+        {
+            "id": "1.7",
+            "value": "Two-person launch crew; system deploys from two standard transit cases; runway independent (pneumatic catapult launch, net or skid recovery).",
+            "unit": null,
+            "quote": "Meets T=O.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor explicitly states compliance with T=O and provides details on rapid, austere deployment capabilities."
+        },
+        {
+            "id": "1.8",
+            "value": true,
+            "unit": null,
+            "quote": "Kestrel provides 800 W continuous / 1.2 kW peak payload power at 28 VDC with MIL-STD-1275 conditioning; integrates sensors, autopilot, communications, and navigation per MOSA-aligned open interfaces.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "1.9",
+            "value": "Meets objective: secure BLOS via commercial SATCOM (Ku) with FMV and metadata; Link-16 via integrated STT terminal (fielded 2025).",
+            "unit": null,
+            "quote": "Meets objective: secure BLOS via commercial SATCOM (Ku) with FMV and metadata; Link-16 via integrated STT terminal (fielded 2025).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor explicitly states that it meets objective for secure BLOS with FMV and metadata plus integrated Link-16."
+        },
+        {
+            "id": "1.10",
+            "value": "Meets objective: GPS (SAASM-ready), tactical-grade INS, and alternative PNT via vision-aided navigation in GPS-denied conditions.",
+            "unit": null,
+            "quote": "Meets objective: GPS (SAASM-ready), tactical-grade INS, and alternative PNT via vision-aided navigation in GPS-denied conditions.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor provides GPS, INS, and Alt PNT navigation capabilities, meeting the objective."
+        },
+        {
+            "id": "1.11",
+            "value": "Compliant (T=O): secure BLOS C2 plus fully autonomous pre-programmed mission execution with lost-link contingency profiles.",
+            "unit": null,
+            "quote": "Compliant (T=O): secure BLOS C2 plus fully autonomous pre-programmed mission execution with lost-link contingency profiles.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor explicitly states compliance with T=O by providing secure BLOS C2 and pre-programmed mission execution."
+        },
+        {
+            "id": "1.12",
+            "value": "Meets objective: automated route planning, in-flight dynamic re-tasking, sensor scheduling, and air-traffic deconfliction via integrated ADS-B In.",
+            "unit": null,
+            "quote": "Meets objective: automated route planning, in-flight dynamic re-tasking, sensor scheduling, and air-traffic deconfliction via integrated ADS-B In.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor explicitly states it meets the objective and provides automated route planning, dynamic re-tasking, sensor scheduling, and air-traffic deconfliction."
+        },
+        {
+            "id": "1.12b",
+            "value": "Meets objective: edge GPU module supports multi-INT fusion and automatic target recognition (ATR) with operator-in-the-loop confirmation.",
+            "unit": null,
+            "quote": "Meets objective: edge GPU module supports multi-INT fusion and automatic target recognition (ATR) with operator-in-the-loop confirmation.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor explicitly meets the objective by offering edge GPU processing supporting multi-INT fusion and ATR."
+        },
+        {
+            "id": "1.13",
+            "value": "Threshold met with objective features: ruggedized laptop GCS (11 kg total footprint) with mission-essential processing; operates from location separate from L/R site. Objective capability provided via optional Meridian Nexus suite: collaborative multi-analyst environment and automated report generation/dissemination to DCGS.",
+            "unit": null,
+            "quote": "Threshold met with objective features: ruggedized laptop GCS (11 kg total footprint) with mission-essential processing; operates from location separate from L/R site.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets both threshold and objective capabilities through its GCS and optional Meridian Nexus suite for collaborative analysis and automated reporting."
+        },
+        {
+            "id": "2.1",
+            "value": "Objective met: secure BLOS with FMV and metadata at 52 Mbps sustained; Link-16 integrated.",
+            "unit": null,
+            "quote": "Objective met: secure BLOS with FMV and metadata at 52 Mbps sustained; Link-16 integrated.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective requirement with 52 Mbps sustained secure BLOS FMV/metadata and integrated Link-16."
+        },
+        {
+            "id": "2.2",
+            "value": "Objective met: integrates with aircraft, sensors, and secure networks (NSA Type 1 encryptor option).",
+            "unit": null,
+            "quote": "Objective met: integrates with aircraft, sensors, and secure networks (NSA Type 1 encryptor option).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by integrating with aircraft, sensors, and secure networks."
+        },
+        {
+            "id": "3.1",
+            "value": "Objective met: GPS + INS + Alt PNT (vision-aided and signals-of-opportunity modes).",
+            "unit": null,
+            "quote": "Objective met: GPS + INS + Alt PNT (vision-aided and signals-of-opportunity modes).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by providing GPS, INS, and Alt PNT navigation."
+        },
+        {
+            "id": "3.2",
+            "value": "Objective met: integrated with flight controls and all sensor payloads for geo-registration.",
+            "unit": null,
+            "quote": "Objective met: integrated with flight controls and all sensor payloads for geo-registration.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by integrating navigation with both flight controls and sensor payloads."
+        },
+        {
+            "id": "4.1",
+            "value": "Compliant (T=O): secure BLOS and autonomous pre-programmed mission modes.",
+            "unit": null,
+            "quote": "Compliant (T=O): secure BLOS and autonomous pre-programmed mission modes.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor explicitly states compliance with T=O for secure BLOS and autonomous pre-programmed mission modes."
+        },
+        {
+            "id": "4.2",
+            "value": "Objective met: integrated with flight controls, sensors, and secure networks.",
+            "unit": null,
+            "quote": "Objective met: integrated with flight controls, sensors, and secure networks.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by integrating C2 with flight controls, sensors, and secure networks."
+        },
+        {
+            "id": "5.1",
+            "value": "Objective met: multi-INT fusion, ATR, edge processing on 40 TOPS GPU module.",
+            "unit": null,
+            "quote": "Objective met: multi-INT fusion, ATR, edge processing on 40 TOPS GPU module.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor satisfies the objective by offering multi-INT fusion, ATR, and edge processing on a 40 TOPS GPU module."
+        },
+        {
+            "id": "5.2",
+            "value": "Objective met: integrates with all sensors and secure networks.",
+            "unit": null,
+            "quote": "Objective met: integrates with all sensors and secure networks.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by integrating processing with sensors and secure networks."
+        },
+        {
+            "id": "6.1",
+            "value": "Objective met: multi-spectral (VNIR/SWIR) HD imager. GSD: 8 cm at 12,000 ft AGL nadir.",
+            "unit": null,
+            "quote": "Objective met: multi-spectral (VNIR/SWIR) HD imager.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by offering a multi-spectral HD imager and providing GSD performance."
+        },
+        {
+            "id": "6.2",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant (T=O): 4 TB onboard solid-state storage retains all mission imagery until EUD transfer confirmed.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "6.3",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant (T=O): in-mission and post-mission download to EUD (ATAK-compatible).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "7.1",
+            "value": "Objective met: gimbaled 360-degree turret plus wide-area persistent surveillance mode (city-scale WAMI at 2 Hz).",
+            "unit": null,
+            "quote": "Objective met: gimbaled 360-degree turret plus wide-area persistent surveillance mode (city-scale WAMI at 2 Hz).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by providing a gimbaled 360-degree turret plus a wide-area persistent surveillance mode."
+        },
+        {
+            "id": "7.2",
+            "value": "Objective met: EO/IR multi-spectral HD (1080p). GSD 12 cm at 10,000 ft slant range 4 km.",
+            "unit": null,
+            "quote": "Objective met: EO/IR multi-spectral HD (1080p).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective with EO/IR multi-spectral HD imagery and includes GSD performance."
+        },
+        {
+            "id": "7.3",
+            "value": 50,
+            "unit": "Mbps",
+            "quote": "50 Mbps compliant (T=O); demonstrated 55 Mbps sustained.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "7.4",
+            "value": "Objective met: single-sensor moving target tracking, vehicle-class targets to 60 km/h.",
+            "unit": null,
+            "quote": "Objective met: single-sensor moving target tracking, vehicle-class targets to 60 km/h.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by providing single-sensor moving target tracking for vehicle-class targets up to 60 km/h."
+        },
+        {
+            "id": "7.5",
+            "value": "Objective met: 24 simultaneous tracks per sensor.",
+            "unit": null,
+            "quote": "Objective met: 24 simultaneous tracks per sensor.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by supporting 24 simultaneous tracks per sensor."
+        },
+        {
+            "id": "7.6",
+            "value": "Objective met: eye-safe LRF, 10 km range, +/-2 m accuracy.",
+            "unit": null,
+            "quote": "Objective met: eye-safe LRF, 10 km range, +/-2 m accuracy.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by including an eye-safe LRF with a 10 km range and +/-2 m accuracy."
+        },
+        {
+            "id": "7.7",
+            "value": "Objective met: NATO STANAG 3733 compatible laser target indication.",
+            "unit": null,
+            "quote": "Objective met: NATO STANAG 3733 compatible laser target indication.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets the objective by providing NATO STANAG 3733 compatible laser target indication."
+        },
+        {
+            "id": "7.8",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant (T=O): integrated with aircraft, C3, navigation, and EUD.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "8.1",
+            "value": "Compliant (T=O): SDR-based detector, 30 MHz - 6 GHz, waveform library including push-to-talk, LTE, and PMR; details in classified annex available under appropriate handling.",
+            "unit": null,
+            "quote": "Compliant (T=O): SDR-based detector, 30 MHz - 6 GHz, waveform library including push-to-talk, LTE, and PMR; details in classified annex available under appropriate handling.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "8.2",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant (T=O): integrated with aircraft, C3, navigation, EUD.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "9.1",
+            "value": "Available options: AIS receiver maritime payload and hyperspectral imager (TRL 7).",
+            "unit": null,
+            "quote": "Available options: AIS receiver maritime payload and hyperspectral imager (TRL 7).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "9.2",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant (T=O) for all offered payloads.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "10.1",
+            "value": "Threshold met (minimal footprint, mission-essential processing); objective met with Nexus suite (collaborative analysis, automated reporting/dissemination).",
+            "unit": null,
+            "quote": "Threshold met (minimal footprint, mission-essential processing); objective met with Nexus suite (collaborative analysis, automated reporting/dissemination).",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor meets both threshold and objective capabilities using the Nexus suite for collaborative analysis and automated reporting."
+        },
+        {
+            "id": "10.2",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant (T=O): integrates with aircraft, sensors, C3, navigation, and EUD.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "KSA-1",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant: MA-240 holds a USAF Group 3 airworthiness assessment (MIL-HDBK-516C basis), issued Nov 2025.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "KSA-2",
+            "value": "Compliant: IFF Mode 3/A transponder standard; Mode 5 growth option.",
+            "unit": null,
+            "quote": "Compliant: IFF Mode 3/A transponder standard; Mode 5 growth option.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor explicitly provides an IFF Mode 3/A transponder standard, meeting T=O."
+        },
+        {
+            "id": "KSA-3",
+            "value": true,
+            "unit": null,
+            "quote": "Compliant: authorized to operate on SIPRNet-connected ground segments; IL5 cloud data path.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": null,
+            "llm_grade_rationale": null
+        },
+        {
+            "id": "KSA-4",
+            "value": "Current capacity 14 aircraft/month, scalable to 30/month within 4 months of contract start. First article delivery: 60 days ARO.",
+            "unit": null,
+            "quote": "Current capacity 14 aircraft/month, scalable to 30/month within 4 months of contract start.",
+            "page": null,
+            "confidence": "high",
+            "llm_grade": "MEETS_OBJECTIVE",
+            "llm_grade_rationale": "The vendor states production scales to 30/month within 4 months and provides initial delivery timelines, satisfying T=O."
+        }
+    ]
+}
