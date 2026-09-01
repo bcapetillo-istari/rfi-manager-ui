@@ -12,9 +12,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 from .models import Project
+
+# Parallel response processing (pipeline.process_responses) checkpoints from
+# multiple threads; serializing saves keeps each written snapshot internally
+# consistent. The write itself was already atomic (temp + fsync + rename).
+_SAVE_LOCK = threading.Lock()
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -36,8 +42,11 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 
 def save_project(project: Project, path: str | Path) -> None:
-    """Persist the project index atomically (called on every state transition)."""
-    _atomic_write_text(Path(path), json.dumps(project.to_dict(), indent=2))
+    """Persist the project index atomically (called on every state
+    transition). Thread-safe: serialization AND write happen under one lock
+    so concurrent response threads each persist a coherent snapshot."""
+    with _SAVE_LOCK:
+        _atomic_write_text(Path(path), json.dumps(project.to_dict(), indent=2))
 
 
 def load_project(path: str | Path) -> Project:

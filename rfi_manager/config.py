@@ -21,6 +21,7 @@ ENV_ISTARI_BASE_URL = "ISTARI_BASE_URL"
 ENV_LLM_PROVIDER = "RFI_LLM_PROVIDER"
 ENV_LLM_MODEL = "RFI_LLM_MODEL"
 ENV_DO_CUSTOM_EXTRACTION = "DO_CUSTOM_EXTRACTION"
+ENV_RESPONSE_EXTRACTION_BATCH_SIZE = "RESPONSE_EXTRACTION_BATCH_SIZE"
 
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
@@ -31,7 +32,35 @@ def custom_extraction_enabled() -> bool:
     (rfi_manager/pdf_extraction.py) instead of Istari's own @istari:extract
     job."""
     load_dotenv()
-    return os.environ.get(ENV_DO_CUSTOM_EXTRACTION, "").strip().lower() in _TRUTHY_ENV_VALUES
+    return (
+        os.environ.get(ENV_DO_CUSTOM_EXTRACTION, "").strip().lower()
+        in _TRUTHY_ENV_VALUES
+    )
+
+
+def load_response_extraction_batch_size() -> int | None:
+    """RESPONSE_EXTRACTION_BATCH_SIZE (env, loaded like DO_CUSTOM_EXTRACTION):
+    how many responses process in flight at once (rolling window across the
+    platform's agents; 1 = sequential). Unset/empty -> None, letting
+    config.toml's response_concurrency or the built-in default (20) apply.
+    Set but invalid -> ConfigError — a typo'd value must never silently
+    degrade to a default."""
+    load_dotenv()
+    raw = os.environ.get(ENV_RESPONSE_EXTRACTION_BATCH_SIZE, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigError(
+            f"{ENV_RESPONSE_EXTRACTION_BATCH_SIZE} must be a positive "
+            f"integer, got {raw!r}"
+        ) from None
+    if value < 1:
+        raise ConfigError(
+            f"{ENV_RESPONSE_EXTRACTION_BATCH_SIZE} must be >= 1, got {value}"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -42,6 +71,9 @@ class IstariConfig:
     job_poll_interval_s: float = 3.0
     job_timeout_s: float = 900.0
     retries: int = 2
+    # responses processed in flight at once (rolling window across the
+    # platform's agents); 1 = sequential
+    response_concurrency: int = 20
 
 
 @dataclass(frozen=True)
@@ -105,7 +137,9 @@ def load_config(
 
     base_url = os.environ.get(ENV_ISTARI_BASE_URL) or istari_raw.get("base_url", "")
     if not base_url and require_token:
-        raise ConfigError("istari.base_url missing from config.toml (or ISTARI_BASE_URL env)")
+        raise ConfigError(
+            "istari.base_url missing from config.toml (or ISTARI_BASE_URL env)"
+        )
 
     return AppConfig(
         istari=IstariConfig(
@@ -115,6 +149,11 @@ def load_config(
             job_poll_interval_s=float(istari_raw.get("job_poll_interval_s", 3.0)),
             job_timeout_s=float(istari_raw.get("job_timeout_s", 900.0)),
             retries=int(istari_raw.get("retries", 2)),
+            # env wins over config.toml, matching the other env overrides
+            response_concurrency=(
+                load_response_extraction_batch_size()
+                or int(istari_raw.get("response_concurrency", 20))
+            ),
         ),
         llm=LLMConfig(
             provider=os.environ.get(ENV_LLM_PROVIDER) or llm_raw.get("provider"),

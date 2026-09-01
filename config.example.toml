@@ -14,6 +14,10 @@ request_timeout_s = 60.0
 job_poll_interval_s = 3.0
 job_timeout_s = 900.0
 retries = 2
+# responses processed in flight at once (rolling window across the
+# platform's agents); 1 = sequential. The RESPONSE_EXTRACTION_BATCH_SIZE
+# env var, when set, overrides this value.
+response_concurrency = 20
 
 [llm]
 # Optional defaults forwarded as LLM-job parameters; leave unset to use the

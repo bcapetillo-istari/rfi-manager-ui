@@ -25,6 +25,12 @@ Goal: make bulk handling of 100+ RFI responses practical.
   may run hours; FR5 idempotency + FR11 resume make interruption safe.
   Parallel ingestion is a separate future effort (requires rethinking
   single-threaded project-file writes).
+  **SUPERSEDED 2026-09-01:** responses now process with up to
+  `response_concurrency` in flight at once (config.toml, default 20) — a
+  rolling window across the platform's agents, implemented in
+  `pipeline.process_responses`. Project-file writes serialize under a lock
+  in `persistence.save_project`; each record is owned by exactly one
+  thread; FR5/FR11 semantics unchanged.
 
 ## SDK support (verified against installed istari-digital-client 11.2.0)
 
