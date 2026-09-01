@@ -195,6 +195,13 @@ class MainWindow(QMainWindow):
         self.connect_button = QPushButton("Connect")
         self.connect_button.setObjectName("primaryButton")
         self.connect_button.clicked.connect(self.connect_to_registry)
+        # editing either credential re-arms Connect as the current step
+        self.registry_url_edit.textChanged.connect(
+            lambda _t: self.connect_button.setEnabled(True)
+        )
+        self.pat_edit.textChanged.connect(
+            lambda _t: self.connect_button.setEnabled(True)
+        )
         conn_row.addWidget(self.connect_button)
         self.connection_label = QLabel(
             " connected (injected)" if istari else " not connected"
@@ -202,6 +209,9 @@ class MainWindow(QMainWindow):
         self.connection_label.setProperty("role", "hint")
         conn_row.addWidget(self.connection_label)
         conn_row.addStretch(1)
+        if istari is not None:  # injected adapter: already connected
+            self.connect_button.setEnabled(False)
+            self.stage1_page.set_connected(True)
         conn_layout.addLayout(conn_row)
 
         # Linked Account bound to every LLM job (docs/LLM_Call_Flow.md):
@@ -304,7 +314,10 @@ class MainWindow(QMainWindow):
     def _on_connected(self, result) -> None:
         adapter, user = result
         self._istari = adapter
-        self.connect_button.setEnabled(True)
+        # progressive-primary flow: Connect stays dimmed once connected (a
+        # changed URL/PAT re-arms it); Load System becomes the current step
+        self.connect_button.setEnabled(False)
+        self.stage1_page.set_connected(True)
         self.connection_label.setText(f" connected as {user}")
         self.log(f"connected to registry as {user}")
         self.refresh_credentials()
