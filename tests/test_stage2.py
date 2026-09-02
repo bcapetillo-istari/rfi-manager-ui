@@ -242,3 +242,101 @@ def test_stage2_job_failure_marks_failed_then_retry(tmp_path: Path):
         poll_interval_s=0, force=True,
     )
     assert result.state is PipelineState.DONE
+
+
+# ------------------------------------- parallel batches (process_responses)
+
+def test_process_responses_rolling_window(monkeypatch, tmp_path):
+    """Concurrency is a rolling window: real overlap happens, the cap is
+    never exceeded, and every record is processed exactly once."""
+    import threading
+    import time as _time
+
+    from rfi_manager import pipeline as pl
+
+    active = 0
+    peak = 0
+    counter_lock = threading.Lock()
+    processed: list[str] = []
+
+    def stub(istari, llm_config, project, path, record, req, **kwargs):
+        nonlocal active, peak
+        with counter_lock:
+            active += 1
+            peak = max(peak, active)
+        _time.sleep(0.02)
+        with counter_lock:
+            active -= 1
+            processed.append(record.uuid)
+        return record
+
+    monkeypatch.setattr(pl, "process_response", stub)
+    records = [ResponseRecord(uuid=f"r{i}") for i in range(12)]
+
+    result = pl.process_responses(
+        None, None, Project(rfi_uuid="rfi-1"), tmp_path / "p.rfiproj",
+        records, None, concurrency=4,
+    )
+
+    assert result == records
+    assert sorted(processed) == sorted(r.uuid for r in records)
+    assert peak <= 4, f"window cap exceeded: {peak}"
+    assert peak > 1, "no overlap observed — batch ran sequentially"
+
+
+def test_process_responses_concurrency_one_is_sequential(monkeypatch, tmp_path):
+    from rfi_manager import pipeline as pl
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        pl, "process_response",
+        lambda istari, llm_config, project, path, record, req, **kw: order.append(
+            record.uuid
+        ),
+    )
+    records = [ResponseRecord(uuid=f"r{i}") for i in range(5)]
+    pl.process_responses(
+        None, None, Project(rfi_uuid="rfi-1"), tmp_path / "p.rfiproj",
+        records, None, concurrency=1,
+    )
+    assert order == [r.uuid for r in records]  # submit order preserved
+
+
+def test_process_responses_invalid_concurrency(tmp_path):
+    from rfi_manager import pipeline as pl
+
+    with pytest.raises(ValueError, match="concurrency"):
+        pl.process_responses(
+            None, None, Project(rfi_uuid="rfi-1"), tmp_path / "p.rfiproj",
+            [], None, concurrency=0,
+        )
+
+
+def test_process_responses_parallel_end_to_end(tmp_path: Path):
+    """Full pipeline through the fake with real threads: 6 responses, window
+    of 3, identical LLM outputs (order-independent), all end DONE and the
+    project file on disk is coherent."""
+    from rfi_manager.pipeline import process_responses
+
+    istari, project, req_artifact, _response, path = make_setup(tmp_path)
+    records = []
+    for i in range(6):
+        model = istari.add_model(f"vendor-{i}.pdf", text=f"RESPONSE {i}")
+        record = ResponseRecord(uuid=model.model_id)
+        project.responses.append(record)
+        records.append(record)
+        istari.queue_llm_output(ANSWERS_JSON)
+
+    events: list[str] = []
+    process_responses(
+        istari, llm_config(istari), project, path, records, req_artifact,
+        concurrency=3, poll_interval_s=0,
+        progress=lambda s, d: events.append(d),
+    )
+
+    assert all(r.state is PipelineState.DONE for r in records)
+    # per-response progress stays namespaced uuid::detail
+    assert any("::" in e for e in events)
+    reloaded = load_project(path)
+    assert sorted(r.uuid for r in reloaded.responses if r.state is PipelineState.DONE) \
+        >= sorted(r.uuid for r in records)

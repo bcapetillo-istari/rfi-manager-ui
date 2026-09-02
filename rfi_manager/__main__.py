@@ -30,7 +30,16 @@ def main(argv: list[str] | None = None) -> int:
         LLMConfig,
         custom_extraction_enabled,
         load_config,
+        load_response_extraction_batch_size,
     )
+
+    # resolve the env-driven batch size FIRST: an invalid value is a hard
+    # startup error, never masked by the missing-config fallback below
+    try:
+        env_batch_size = load_response_extraction_batch_size()
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     try:
         config = load_config(args.config, require_token=False)
@@ -38,7 +47,11 @@ def main(argv: list[str] | None = None) -> int:
         # no config file is fine — the UI collects the connection details
         print(f"note: {e} — starting with built-in defaults", file=sys.stderr)
         config = AppConfig(
-            istari=IstariConfig(base_url="", token=""),
+            istari=IstariConfig(
+                base_url="",
+                token="",
+                response_concurrency=env_batch_size or 20,
+            ),
             llm=LLMConfig(),
             do_custom_extraction=custom_extraction_enabled(),
         )
@@ -59,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         request_timeout_s=config.istari.request_timeout_s,
         retries=config.istari.retries,
         do_custom_extraction=config.do_custom_extraction,
+        response_concurrency=config.istari.response_concurrency,
     )
     window.show()
     return app.exec()

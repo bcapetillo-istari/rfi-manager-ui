@@ -49,8 +49,11 @@ class Stage1Page(QWidget):
         system_row.setSpacing(8)
         self.system_edit = QLineEdit()
         self.system_edit.setPlaceholderText("Istari UUID of the RFI System")
+        # a new system id re-arms Load System (the flow steps back to it)
+        self.system_edit.textChanged.connect(self._on_system_id_changed)
         system_row.addWidget(self.system_edit)
         self.load_button = QPushButton("Load System")
+        self.load_button.setObjectName("primaryButton")
         self.load_button.clicked.connect(self._on_load_system)
         system_row.addWidget(self.load_button)
         form.addRow("RFI System UUID", system_row)
@@ -87,8 +90,25 @@ class Stage1Page(QWidget):
         layout.addStretch(1)
 
         self._busy = False
+        # progressive-primary flow: exactly one blue (enabled primary) button
+        # at a time — Connect (main window) -> Load System -> Extract. All
+        # three share the primaryButton style; the disabled state renders as
+        # the dimmed grey.
+        self._connected = False
+        self._loading = False
+        self._files_loaded = False
+        self._update_buttons()
 
     # -------------------------------------------------------------- events
+
+    def set_connected(self, connected: bool) -> None:
+        """Load System is the flow's current step only once connected."""
+        self._connected = connected
+        self._update_buttons()
+
+    def _on_system_id_changed(self, _text: str) -> None:
+        self._files_loaded = False
+        self._update_buttons()
 
     def _on_load_system(self) -> None:
         system_id = self.system_edit.text().strip()
@@ -139,6 +159,7 @@ class Stage1Page(QWidget):
     def set_files_loading(self) -> None:
         """Branch files are being fetched: clear + disable the picker so a
         stale entry can't be selected, and show the spinner."""
+        self._loading = True
         self.file_combo.blockSignals(True)
         self.file_combo.clear()
         self.file_combo.blockSignals(False)
@@ -148,6 +169,8 @@ class Stage1Page(QWidget):
         self._update_buttons()
 
     def set_files(self, files: list[SystemFileInfo]) -> None:
+        self._loading = False
+        self._files_loaded = bool(files)
         self.file_loading.hide()
         self.file_combo.blockSignals(True)
         self.file_combo.clear()
@@ -174,7 +197,14 @@ class Stage1Page(QWidget):
     # -------------------------------------------------------------- state
 
     def _update_buttons(self) -> None:
-        self.load_button.setEnabled(not self._busy)
+        # Load System is blue exactly while it's the current step: connected,
+        # nothing in flight, and this system's files not loaded yet
+        self.load_button.setEnabled(
+            self._connected
+            and not self._busy
+            and not self._loading
+            and not self._files_loaded
+        )
         self.extract_button.setEnabled(
             not self._busy
             and self.file_combo.isEnabled()

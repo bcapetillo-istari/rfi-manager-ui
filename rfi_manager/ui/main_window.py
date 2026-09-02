@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         request_timeout_s: float = 60.0,
         retries: int = 2,
         do_custom_extraction: bool = False,
+        response_concurrency: int = 1,
     ) -> None:
         """``istari`` may be a ready adapter (tests/fakes) or None — the
         normal flow is: user types Registry URL + PAT into the connection bar
@@ -103,6 +104,7 @@ class MainWindow(QMainWindow):
         self._request_timeout_s = request_timeout_s
         self._retries = retries
         self._do_custom_extraction = do_custom_extraction
+        self._response_concurrency = response_concurrency
         self._pool = QThreadPool.globalInstance()
         self._workers: list[Worker] = []  # keep refs while running
 
@@ -195,6 +197,13 @@ class MainWindow(QMainWindow):
         self.connect_button = QPushButton("Connect")
         self.connect_button.setObjectName("primaryButton")
         self.connect_button.clicked.connect(self.connect_to_registry)
+        # editing either credential re-arms Connect as the current step
+        self.registry_url_edit.textChanged.connect(
+            lambda _t: self.connect_button.setEnabled(True)
+        )
+        self.pat_edit.textChanged.connect(
+            lambda _t: self.connect_button.setEnabled(True)
+        )
         conn_row.addWidget(self.connect_button)
         self.connection_label = QLabel(
             " connected (injected)" if istari else " not connected"
@@ -202,6 +211,9 @@ class MainWindow(QMainWindow):
         self.connection_label.setProperty("role", "hint")
         conn_row.addWidget(self.connection_label)
         conn_row.addStretch(1)
+        if istari is not None:  # injected adapter: already connected
+            self.connect_button.setEnabled(False)
+            self.stage1_page.set_connected(True)
         conn_layout.addLayout(conn_row)
 
         # Linked Account bound to every LLM job (docs/LLM_Call_Flow.md):
@@ -304,7 +316,10 @@ class MainWindow(QMainWindow):
     def _on_connected(self, result) -> None:
         adapter, user = result
         self._istari = adapter
-        self.connect_button.setEnabled(True)
+        # progressive-primary flow: Connect stays dimmed once connected (a
+        # changed URL/PAT re-arms it); Load System becomes the current step
+        self.connect_button.setEnabled(False)
+        self.stage1_page.set_connected(True)
         self.connection_label.setText(f" connected as {user}")
         self.log(f"connected to registry as {user}")
         self.refresh_credentials()
@@ -675,9 +690,12 @@ class MainWindow(QMainWindow):
         self._run_responses([record], force=True)
 
     def _run_responses(self, records: list[ResponseRecord], *, force: bool) -> None:
-        """Process a batch sequentially in ONE worker so project-file writes
-        stay single-threaded. Re-entrancy guarded: a second batch (retry click,
-        resume, rebuild) must wait for the running one."""
+        """Process a batch in ONE Qt worker; inside it, up to
+        response_concurrency responses run in flight at once
+        (pipeline.process_responses — rolling window across the platform's
+        agents; project-file writes serialize in persistence). Re-entrancy
+        guarded: a second batch (retry click, resume, rebuild) must wait for
+        the running one."""
         if self._batch_running:
             QMessageBox.warning(
                 self, "Busy", "A batch is already running — " "wait for it to finish."
@@ -694,27 +712,21 @@ class MainWindow(QMainWindow):
         poll, timeout = self._poll_interval_s, self._job_timeout_s
 
         def batch(progress=None, log=None):
-            for record in records:
-                per_response = (
-                    (lambda s, d, u=record.uuid: progress(s, f"{u}::{d}"))
-                    if progress
-                    else None
-                )
-                pipeline.process_response(
-                    istari,
-                    llm_config,
-                    project,
-                    path,
-                    record,
-                    req_artifact,
-                    force=force,
-                    do_custom_extraction=self._do_custom_extraction,
-                    poll_interval_s=poll,
-                    job_timeout_s=timeout,
-                    progress=per_response,
-                    log=log,
-                )
-            return records
+            return pipeline.process_responses(
+                istari,
+                llm_config,
+                project,
+                path,
+                records,
+                req_artifact,
+                force=force,
+                do_custom_extraction=self._do_custom_extraction,
+                concurrency=self._response_concurrency,
+                poll_interval_s=poll,
+                job_timeout_s=timeout,
+                progress=progress,
+                log=log,
+            )
 
         self._batch_running = True
         self.stage2_page.set_busy(True)

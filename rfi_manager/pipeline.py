@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
@@ -1281,6 +1282,68 @@ def process_response(
             _notify(progress, "failed", str(e))
             _log(log, f"response {record.uuid}: FAILED: {e}")
     return record
+
+
+def process_responses(
+    istari: IstariClient,
+    llm_config: LLMJobConfig,
+    project: Project,
+    project_path: Path | str,
+    records: list[ResponseRecord],
+    requirements_artifact: RequirementsArtifact,
+    *,
+    force: bool = False,
+    do_custom_extraction: bool = False,
+    concurrency: int = 1,
+    poll_interval_s: float = 3.0,
+    job_timeout_s: float = 900.0,
+    progress: ProgressCallback | None = None,
+    log: LogCallback | None = None,
+) -> list[ResponseRecord]:
+    """Drive a batch of responses with up to ``concurrency`` in flight at
+    once — utilizing multiple platform agents for 100+ response batches.
+
+    A ROLLING WINDOW, not lockstep batches: as one response finishes, the
+    next starts, so agents never idle waiting on a batch's slowest straggler,
+    and never more than ``concurrency`` responses are in flight.
+
+    Thread model (why this is safe):
+    - each record is processed by exactly one thread; records are disjoint,
+      so no record is ever mutated by two threads
+    - project-file checkpoints are serialized by persistence.save_project's
+      module lock; the file stays a pointer cache (§3.6a) and FR11 recovery
+      already tolerates a checkpoint from any moment
+    - progress/log callbacks may fire from any worker thread — the UI's
+      signal emission is thread-safe (queued across threads)
+    Per-response progress is namespaced ``uuid::detail`` exactly as the
+    sequential path emitted. Pipeline failures still end records as FAILED
+    without raising (FR10); programming errors propagate after the batch
+    drains.
+    """
+    if concurrency < 1:
+        raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+
+    def run_one(record: ResponseRecord) -> ResponseRecord:
+        per_progress = (
+            (lambda s, d, u=record.uuid: progress(s, f"{u}::{d}"))
+            if progress is not None
+            else None
+        )
+        return process_response(
+            istari, llm_config, project, project_path, record,
+            requirements_artifact, force=force,
+            do_custom_extraction=do_custom_extraction,
+            poll_interval_s=poll_interval_s, job_timeout_s=job_timeout_s,
+            progress=per_progress, log=log,
+        )
+
+    with ThreadPoolExecutor(
+        max_workers=concurrency, thread_name_prefix="response"
+    ) as pool:
+        futures = [pool.submit(run_one, record) for record in records]
+    for future in futures:  # pool has drained; surface programming errors
+        future.result()
+    return records
 
 
 def retry_response(

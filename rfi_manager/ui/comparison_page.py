@@ -81,7 +81,8 @@ class ComparisonModel(QAbstractTableModel):
             return "Vendor"
         req_index = section - 1
         if req_index < len(self._requirements):
-            return self._requirements[req_index].label
+            req = self._requirements[req_index]
+            return f"{req.id} — {req.label}"
         return ["Response UUID", "Schema rev"][section - 1 - len(self._requirements)]
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole) -> Any:
@@ -201,7 +202,7 @@ class ComparisonPage(QWidget):
         self.filter_combo.addItems(FILTERS)
         controls.addWidget(self.filter_combo)
         controls.addStretch(1)
-        self.commit_button = QPushButton("Commit to Istari")
+        self.commit_button = QPushButton("Commit Results to Istari")
         self.commit_button.clicked.connect(self.commit_observations_requested.emit)
         controls.addWidget(self.commit_button)
         layout.addLayout(controls)

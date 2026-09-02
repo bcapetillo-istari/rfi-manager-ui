@@ -66,12 +66,21 @@ def main() -> None:
     with mock.patch.object(QMessageBox, "warning") as w:
         win.start_extraction("anything", "")
         assert w.called, "actions must be blocked before connecting"
+    # progressive-primary flow: Connect is the only enabled step pre-connect
+    assert win.connect_button.isEnabled()
+    assert not win.stage1_page.load_button.isEnabled()
     win.registry_url_edit.setText("https://fake.istari.example")
     win.pat_edit.setText("fake-pat")
     win.connect_to_registry()
     pump(app, lambda: "connected as" in win.connection_label.text(), "connect")
     pump(app, lambda: win.llm_cred_combo.count() == 2, "credentials")
-    print("0. connection bar (guard, connect, credentials load): OK")
+    # after connect: Connect dims, Load System becomes the current step
+    assert not win.connect_button.isEnabled()
+    assert win.stage1_page.load_button.isEnabled()
+    win.pat_edit.setText("fake-pat-2")  # editing credentials re-arms Connect
+    assert win.connect_button.isEnabled()
+    win.pat_edit.setText("fake-pat")
+    print("0. connection bar (guard, connect, flow progression): OK")
 
     # ---- 1. Stage 1 via system pickers + review edits + commit (FR1/FR2)
     system_id = istari.add_system([rfi.model_id, ra.model_id, rb.model_id])
@@ -85,8 +94,14 @@ def main() -> None:
     # loading spinners cleared once the listing landed
     assert win.stage1_page.file_loading.isHidden()
     assert win.stage2_page.file_loading.isHidden()
+    # after files load: Load System dims, Extract becomes the current step
+    assert not win.stage1_page.load_button.isEnabled()
     win.stage1_page.file_combo.setCurrentIndex(0)  # the RFI
     assert win.stage1_page.extract_button.isEnabled()
+    # a new system id re-arms Load System
+    win.stage1_page.system_edit.setText(system_id + "x")
+    assert win.stage1_page.load_button.isEnabled()
+    win.stage1_page.system_edit.setText(system_id)
     istari.queue_llm_output(REQS)
     win.stage1_page._on_extract()
     pump(app, lambda: win._stack.currentWidget() is win.review_screen, "review screen")
