@@ -37,6 +37,9 @@ from .models import (
     RequirementsArtifact,
 )
 from . import pdf_extraction
+from .logging_setup import get_logger
+
+_module_logger = get_logger()
 
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*\n(.*?)\n\s*```\s*$", re.DOTALL)
 
@@ -414,6 +417,12 @@ class PipelineError(Exception):
         super().__init__(redact(str(message)))
 
 
+class JobTimeout(PipelineError):
+    """We stopped waiting on a platform job that is still running — NOT a
+    failure. The job id stays persisted so a resume re-polls it rather than
+    re-submitting (and re-paying for) the expensive LLM/extraction step."""
+
+
 class IstariClient(Protocol):
     """The istari_adapter interface the pipeline depends on."""
 
@@ -533,7 +542,13 @@ def _stage_text_model(
                 "custom extraction requires a revision id to read the source PDF from"
             )
         pdf_bytes = istari.read_revision_bytes(revision_id)
-        text = pdf_extraction.extract_text(pdf_bytes)
+        try:
+            text = pdf_extraction.extract_text(pdf_bytes)
+        except Exception as e:  # pdfplumber on a corrupt/encrypted/non-PDF file
+            raise PipelineError(
+                f"could not extract text from revision {revision_id} "
+                f"({type(e).__name__})"
+            ) from e
         # char count only — never the extracted content
         _log(
             log,
@@ -719,7 +734,8 @@ def wait_for_job(
             raise PipelineError(f"{kind} job {job_id} ended as {state.value}")
         elapsed = time.monotonic() - start
         if elapsed > timeout_s:
-            raise PipelineError(
+            # still running, we just stopped waiting — resumable, not failed
+            raise JobTimeout(
                 f"{kind} job {job_id} still {state.value} after {int(elapsed)}s"
             )
         _notify(progress, progress_state, f"job {job_id}: {state.value}")
@@ -1045,6 +1061,10 @@ def process_response(
                         poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
                         progress=progress,
                     )
+                except JobTimeout as e:  # still running — resumable, never re-pay
+                    _log(log, f"response {record.uuid}: {e}; will resume on re-run")
+                    _notify(progress, "job_submitted", f"{record.uuid}: timed out waiting")
+                    break
                 except IstariError as e:  # job id no longer usable (FR11)
                     _restart_from_queued(record, project, project_path,
                                          f"job {record.job_id} unusable ({e})", log,
@@ -1096,6 +1116,10 @@ def process_response(
                         poll_interval_s=poll_interval_s, timeout_s=job_timeout_s,
                         progress=progress, kind="LLM", progress_state="llm",
                     )
+                except JobTimeout as e:  # still running — resumable, never re-pay
+                    _log(log, f"response {record.uuid}: {e}; will resume on re-run")
+                    _notify(progress, "llm", f"{record.uuid}: timed out waiting")
+                    break
                 except IstariError as e:  # LLM job id no longer usable (FR11)
                     _restart_from_queued(record, project, project_path,
                                          f"LLM job {record.llm_job_id} unusable ({e})",
@@ -1262,11 +1286,36 @@ def process_response(
                 _log(log, f"response {record.uuid}: done")
 
         except (IstariError, PipelineError) as e:
-            record.transition(PipelineState.FAILED, error=str(e))
-            save_project(project, project_path)
-            _notify(progress, "failed", str(e))
-            _log(log, f"response {record.uuid}: FAILED: {e}")
+            # expected, user-actionable failure — message only (already redacted)
+            _fail_record(record, project, project_path, str(e), progress, log)
+        except Exception as e:  # noqa: BLE001 — batch isolation is the point
+            # an UNEXPECTED error (bad PDF, odd platform shape, a bug) must
+            # fail THIS response, never escape and abort the whole batch.
+            # Log the traceback to the file (forensics) but hand the user a
+            # generic redacted reason, not internals.
+            _module_logger.exception("response %s: unexpected error", record.uuid)
+            _fail_record(
+                record, project, project_path,
+                f"unexpected error ({type(e).__name__})", progress, log,
+            )
     return record
+
+
+def _fail_record(
+    record: ResponseRecord,
+    project: Project,
+    project_path: Path | str,
+    reason: str,
+    progress: ProgressCallback | None,
+    log: LogCallback | None,
+) -> None:
+    from .redaction import redact
+
+    reason = redact(reason)
+    record.transition(PipelineState.FAILED, error=reason)
+    save_project(project, project_path)
+    _notify(progress, "failed", reason)
+    _log(log, f"response {record.uuid}: FAILED: {reason}")
 
 
 def process_responses(
@@ -1301,9 +1350,9 @@ def process_responses(
     - progress/log callbacks may fire from any worker thread — the UI's
       signal emission is thread-safe (queued across threads)
     Per-response progress is namespaced ``uuid::detail`` exactly as the
-    sequential path emitted. Pipeline failures still end records as FAILED
-    without raising (FR10); programming errors propagate after the batch
-    drains.
+    sequential path emitted. Every failure — expected or unexpected — ends
+    the affected record as FAILED without sinking the batch (FR10); one bad
+    response never stops the other 99.
     """
     if concurrency < 1:
         raise ValueError(f"concurrency must be >= 1, got {concurrency}")
@@ -1326,8 +1375,14 @@ def process_responses(
         max_workers=concurrency, thread_name_prefix="response"
     ) as pool:
         futures = [pool.submit(run_one, record) for record in records]
-    for future in futures:  # pool has drained; surface programming errors
-        future.result()
+    # process_response owns its own failures (each record ends FAILED without
+    # raising); this loop is the last-ditch net so a truly unexpected escape
+    # from ONE future is logged, not left to abort the whole batch drain.
+    for future in futures:
+        try:
+            future.result()
+        except Exception:  # noqa: BLE001
+            _module_logger.exception("response worker crashed unexpectedly")
     return records
 
 

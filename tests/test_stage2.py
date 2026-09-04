@@ -340,3 +340,104 @@ def test_process_responses_parallel_end_to_end(tmp_path: Path):
     reloaded = load_project(path)
     assert sorted(r.uuid for r in reloaded.responses if r.state is PipelineState.DONE) \
         >= sorted(r.uuid for r in records)
+
+
+# ------------------------------------- exception handling / batch isolation
+
+def test_job_timeout_leaves_record_resumable_not_failed(tmp_path: Path):
+    """A wall-clock timeout means 'stopped waiting', not 'failed' — the record
+    must stay resumable with its job id, and NOT be re-submitted (no re-pay)."""
+    from rfi_manager.pipeline import process_response
+
+    istari, project, req_artifact, response, path = make_setup(tmp_path)
+    istari.auto_complete_jobs = False  # jobs stay RUNNING forever
+    record = ResponseRecord(uuid=response.model_id)
+    project.responses.append(record)
+
+    process_response(
+        istari, llm_config(istari), project, path, record, req_artifact,
+        poll_interval_s=0, job_timeout_s=-1,  # force immediate timeout
+    )
+
+    # not failed; parked at the extraction wait with the job id preserved
+    assert record.state is PipelineState.JOB_SUBMITTED
+    assert record.error is None
+    assert record.job_id is not None
+    submissions_before = len(istari.job_submissions)
+
+    # resume: it re-polls the SAME job (now completing), never re-submits
+    istari.auto_complete_jobs = True
+    istari.queue_llm_output(ANSWERS_JSON)
+    process_response(
+        istari, llm_config(istari), project, path, record, req_artifact,
+        poll_interval_s=0,
+    )
+    assert record.state is PipelineState.DONE
+    assert len(istari.job_submissions) == submissions_before  # no re-pay
+
+
+def test_bad_pdf_fails_one_record_not_the_batch(tmp_path: Path, monkeypatch):
+    """A corrupt PDF (pdfplumber raises) must fail just that response as
+    FAILED with a clean message — never escape and abort the batch."""
+    from rfi_manager.pipeline import process_responses
+
+    istari, project, req_artifact, _r, path = make_setup(tmp_path)
+    good = istari.add_model("good.pdf", text="GOOD")
+    bad = istari.add_model("bad.pdf")
+    istari.revision_bytes[good.latest_revision_id] = b"%PDF-good%"
+    istari.revision_bytes[bad.latest_revision_id] = b"%PDF-bad%"
+    records = [ResponseRecord(uuid=good.model_id), ResponseRecord(uuid=bad.model_id)]
+    project.responses.extend(records)
+    istari.queue_llm_output(ANSWERS_JSON)  # only the good one reaches the LLM
+
+    def flaky_extract(pdf_bytes):
+        if b"bad" in pdf_bytes:
+            raise ValueError("PDFSyntaxError: No /Root object!")
+        return "GOOD TEXT"
+
+    monkeypatch.setattr(
+        "rfi_manager.pipeline.pdf_extraction.extract_text", flaky_extract
+    )
+
+    process_responses(
+        istari, llm_config(istari), project, path, records, req_artifact,
+        do_custom_extraction=True, concurrency=2, poll_interval_s=0,
+    )
+
+    by_id = {r.uuid: r for r in records}
+    assert by_id[good.model_id].state is PipelineState.DONE  # batch survived
+    assert by_id[bad.model_id].state is PipelineState.FAILED
+    assert "could not extract text" in by_id[bad.model_id].error
+
+
+def test_unexpected_error_isolated_to_one_record(tmp_path: Path, monkeypatch):
+    """An unexpected (non-pipeline) exception fails one record with a generic
+    redacted reason and never sinks the batch."""
+    from rfi_manager import pipeline as pl
+    from rfi_manager.pipeline import process_responses
+
+    istari, project, req_artifact, _r, path = make_setup(tmp_path)
+    good = istari.add_model("a.pdf", text="A")
+    boom = istari.add_model("b.pdf", text="B")
+    records = [ResponseRecord(uuid=good.model_id), ResponseRecord(uuid=boom.model_id)]
+    project.responses.extend(records)
+    istari.queue_llm_output(ANSWERS_JSON)
+
+    real_stage = pl._stage_text_model
+
+    def maybe_boom(istari_, model_id, **kw):
+        if model_id == boom.model_id:
+            raise KeyError("some internal invariant")  # not Istari/PipelineError
+        return real_stage(istari_, model_id, **kw)
+
+    monkeypatch.setattr(pl, "_stage_text_model", maybe_boom)
+
+    process_responses(
+        istari, llm_config(istari), project, path, records, req_artifact,
+        concurrency=2, poll_interval_s=0,
+    )
+
+    by_id = {r.uuid: r for r in records}
+    assert by_id[good.model_id].state is PipelineState.DONE
+    assert by_id[boom.model_id].state is PipelineState.FAILED
+    assert "unexpected error" in by_id[boom.model_id].error

@@ -273,18 +273,20 @@ class IstariAdapter:
         if the model does not exist or has no revisions."""
         try:
             model = self._client.get_model(model_id)
-        except Exception as e:  # SDK raises assorted ApiException types
+            revisions = model.file.revisions or []
+            if not revisions:
+                raise IstariError(f"model {model_id} has no revisions")
+            return ModelInfo(
+                model_id=model_id,
+                name=model.display_name or revisions[0].name,
+                file_id=model.file.id,
+                latest_revision_id=revisions[-1].id,
+                revision_ids=tuple(r.id for r in revisions),
+            )
+        except IstariError:
+            raise  # our own "no revisions" — already clear
+        except Exception as e:  # SDK ApiException OR an unexpected response shape
             raise IstariError(f"cannot fetch model {model_id}: {e}") from e
-        revisions = model.file.revisions or []
-        if not revisions:
-            raise IstariError(f"model {model_id} has no revisions")
-        return ModelInfo(
-            model_id=model_id,
-            name=model.display_name or revisions[0].name,
-            file_id=model.file.id,
-            latest_revision_id=revisions[-1].id,
-            revision_ids=tuple(r.id for r in revisions),
-        )
 
     def model_id_for_revision(self, revision_id: str) -> str:
         """``client.get_revision(revision_id)`` -> ``client.get_file(file_id)``
@@ -333,18 +335,20 @@ class IstariAdapter:
                     description="Extracted text staged as an LLM function job input.",
                     sources=sources,
                 )
+                revisions = model.file.revisions or []
+                if not revisions:
+                    raise IstariError("registered text model has no revisions")
+                return ModelInfo(
+                    model_id=model.id,
+                    name=display_name,
+                    file_id=model.file.id,
+                    latest_revision_id=revisions[-1].id,
+                    revision_ids=tuple(r.id for r in revisions),
+                )
+            except IstariError:
+                raise
             except Exception as e:
                 raise IstariError(f"cannot register text model: {e}") from e
-        revisions = model.file.revisions or []
-        if not revisions:
-            raise IstariError("registered text model has no revisions")
-        return ModelInfo(
-            model_id=model.id,
-            name=display_name,
-            file_id=model.file.id,
-            latest_revision_id=revisions[-1].id,
-            revision_ids=tuple(r.id for r in revisions),
-        )
 
     # --------------------------------------------------------------- jobs
 
@@ -515,9 +519,9 @@ class IstariAdapter:
         resume logic treats as unusable checkpoint evidence (FR11)."""
         try:
             job = self._client.get_job(job_id)
+            status = job.status.name.value  # e.g. "Running"
         except Exception as e:
             raise IstariError(f"cannot fetch job {job_id}: {e}") from e
-        status = job.status.name.value  # e.g. "Running"
         if status in _RUNNING_STATUSES:
             return JobState.RUNNING
         if status == "Completed":
@@ -590,14 +594,16 @@ class IstariAdapter:
                     display_name=name,
                     description=description,
                 )
+                revisions = artifact.file.revisions or []
+                if not revisions:
+                    raise IstariError(f"uploaded artifact {name} has no revisions")
+                return ArtifactInfo(
+                    artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
+                )
+            except IstariError:
+                raise
             except Exception as e:
                 raise IstariError(f"cannot upload artifact {name}: {e}") from e
-        revisions = artifact.file.revisions or []
-        if not revisions:
-            raise IstariError(f"uploaded artifact {name} has no revisions")
-        return ArtifactInfo(
-            artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
-        )
 
     def upload_text_artifact(
         self,
@@ -639,14 +645,16 @@ class IstariAdapter:
                     display_name=name,
                     description=description,
                 )
+                revisions = artifact.file.revisions or []
+                if not revisions:
+                    raise IstariError(f"uploaded artifact {name} has no revisions")
+                return ArtifactInfo(
+                    artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
+                )
+            except IstariError:
+                raise
             except Exception as e:
                 raise IstariError(f"cannot upload artifact {name}: {e}") from e
-        revisions = artifact.file.revisions or []
-        if not revisions:
-            raise IstariError(f"uploaded artifact {name} has no revisions")
-        return ArtifactInfo(
-            artifact_id=artifact.id, name=name, revision_id=revisions[-1].id
-        )
 
     def list_json_artifacts(
         self, model_id: str, name: str
