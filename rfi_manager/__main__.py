@@ -30,22 +30,30 @@ def main(argv: list[str] | None = None) -> int:
         LLMConfig,
         custom_extraction_enabled,
         load_config,
+        load_log_file_location,
         load_response_extraction_batch_size,
     )
+    from .logging_setup import configure_logging, get_logger
+
+    # configure logging before anything else so startup diagnostics land in the file
+    log_path = configure_logging(load_log_file_location())
+    log = get_logger()
+    if log_path is not None:
+        log.info("logging to %s", log_path)
 
     # resolve the env-driven batch size FIRST: an invalid value is a hard
     # startup error, never masked by the missing-config fallback below
     try:
         env_batch_size = load_response_extraction_batch_size()
     except ConfigError as e:
-        print(f"error: {e}", file=sys.stderr)
+        log.error("%s", e)
         return 2
 
     try:
         config = load_config(args.config, require_token=False)
     except ConfigError as e:
         # no config file is fine — the UI collects the connection details
-        print(f"note: {e} — starting with built-in defaults", file=sys.stderr)
+        log.info("%s — starting with built-in defaults", e)
         config = AppConfig(
             istari=IstariConfig(
                 base_url="",

@@ -33,7 +33,14 @@ from .config import IstariConfig
 
 
 class IstariError(Exception):
-    """Raised when a platform operation fails."""
+    """Raised when a platform operation fails. Self-redacting: wrapped SDK
+    exception text can carry a credential, so scrub it in the constructor —
+    this message reaches logs, dialogs, and (via ResponseRecord.error) disk."""
+
+    def __init__(self, message: object = "") -> None:
+        from .redaction import redact
+
+        super().__init__(redact(str(message)))
 
 
 class JobState(str, Enum):

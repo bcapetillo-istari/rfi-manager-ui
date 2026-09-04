@@ -30,6 +30,9 @@ from PySide6.QtWidgets import (
 
 from .. import pipeline
 from ..config import IstariConfig
+from ..logging_setup import get_logger
+
+_module_logger = get_logger()
 from ..file_export import (
     build_comparison_csv,
     build_html_report,
@@ -291,6 +294,9 @@ class MainWindow(QMainWindow):
                 self, "Missing fields", "Enter both the Registry URL and a PAT."
             )
             return
+        from ..redaction import register_secret
+
+        register_secret(pat)  # scrub the PAT from all logs/dialogs/.rfiproj
         config = IstariConfig(
             base_url=url,
             token=pat,
@@ -386,9 +392,14 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------- log
 
     def log(self, message: str) -> None:
-        """Session log (FR10): every SDK call outcome, job id, artifact UUID."""
+        """Session log (FR10): the single sink for all UI/worker log lines,
+        redacted then mirrored to both the panel and the log file."""
+        from ..redaction import redact
+
+        message = redact(message)
         stamp = datetime.now().strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{stamp}] {message}")
+        _module_logger.info(message)
 
     # ------------------------------------------------------------ helpers
 

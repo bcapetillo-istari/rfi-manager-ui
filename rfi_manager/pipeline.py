@@ -405,7 +405,13 @@ ProgressCallback = Callable[[str, str], None]  # (state, detail)
 
 
 class PipelineError(Exception):
-    """A stage failed with a user-actionable reason (FR10)."""
+    """A stage failed with a user-actionable reason (FR10). Self-redacting
+    like IstariError (persisted to .rfiproj via ResponseRecord.error)."""
+
+    def __init__(self, message: object = "") -> None:
+        from .redaction import redact
+
+        super().__init__(redact(str(message)))
 
 
 class IstariClient(Protocol):
@@ -528,11 +534,11 @@ def _stage_text_model(
             )
         pdf_bytes = istari.read_revision_bytes(revision_id)
         text = pdf_extraction.extract_text(pdf_bytes)
+        # char count only — never the extracted content
         _log(
             log,
             f"custom extraction (pdfplumber) of revision {revision_id}: "
-            f"{len(text)} chars"
-            + (f" (preview: {text[:120]!r})" if text else " — EMPTY"),
+            f"{len(text)} chars" + ("" if text else " — EMPTY"),
         )
         # Mirror Istari's own @istari:extract job: record the extracted text
         # as a text.txt artifact on the source model first (provenance
@@ -561,8 +567,7 @@ def _stage_text_model(
     _log(
         log,
         f"read {EXTRACT_TEXT_ARTIFACT} artifact {text_artifact.artifact_id}: "
-        f"{len(text)} chars"
-        + (f" (preview: {text[:120]!r})" if text else " — EMPTY"),
+        f"{len(text)} chars" + ("" if text else " — EMPTY"),
     )
     text_model = istari.register_text_model(
         text, display_name=display_name, source_revision_id=text_artifact.revision_id,
@@ -584,13 +589,13 @@ def _log_llm_submission(
     parameters: dict[str, Any],
     credentials: CredentialSelection,
 ) -> None:
-    """Log exactly what an LLM job submission looks like (requested for
-    diagnosing manifest/contract mismatches against the deployed module)."""
+    """Log the shape of an LLM job submission — parameter KEYS only. Values
+    include requirements_json (document-derived content) and are never logged."""
     _log(
         log,
         f"LLM job submit: function={function} attached_to={attached_resource} "
         f"credentials(llm={credentials.llm_credential_id}) "
-        f"parameters={parameters}",
+        f"parameter_keys={sorted(parameters)}",
     )
 
 
@@ -614,20 +619,6 @@ def _read_llm_output(
         ) from e
     _log(log, f"LLM {output_artifact} artifact found on resource {model_id}")
     return raw
-
-
-def _read_llm_stderr(
-    istari: IstariClient, model_id: str, *, log: "LogCallback | None" = None
-) -> str | None:
-    """Best-effort read of the job's stderr artifact for diagnostics when
-    validation fails or no output is found — surfaces the function's actual
-    traceback/error instead of leaving the user guessing."""
-    from .istari_adapter import LLM_STDERR_ARTIFACT
-
-    try:
-        return istari.read_text_artifact(model_id, LLM_STDERR_ARTIFACT)
-    except IstariError:
-        return None
 
 
 def run_llm_job_validated(
@@ -686,18 +677,13 @@ def run_llm_job_validated(
                 istari, text_model.model_id, output_artifact=output_artifact, log=log
             )
         except IstariError as e:
-            stderr = _read_llm_stderr(istari, text_model.model_id, log=log)
-            if stderr:
-                _log(log, f"LLM job {job_id} stderr:\n{stderr}")
             raise PipelineError(f"LLM job {job_id} produced no readable output: {e}") from e
         _notify(progress, "validating", f"LLM job {job_id} output")
         result = validator(raw)
         if result.ok:
             return result, raw
         errors = result.errors
-        stderr = _read_llm_stderr(istari, text_model.model_id, log=log)
-        if stderr:
-            _log(log, f"LLM job {job_id} stderr (validation failed):\n{stderr}")
+        _log(log, f"LLM job {job_id}: validation failed: {'; '.join(errors)}")
     return result, raw
 
 
@@ -1137,12 +1123,11 @@ def process_response(
                     continue
                 result = validate_answers(raw, requirements)
                 if not result.ok:
-                    stderr = _read_llm_stderr(istari, record.llm_input_model_id, log=log)
-                    if stderr:
-                        _log(log, f"response {record.uuid}: LLM job stderr:\n{stderr}")
+                    _log(log, f"response {record.uuid}: validation failed: "
+                              f"{'; '.join(result.errors)}")
                     if record.llm_attempts < 2:  # retry ONCE (§4), crash-safe
-                        _log(log, f"response {record.uuid}: validation failed — "
-                                  "resubmitting LLM job with validation_errors")
+                        _log(log, f"response {record.uuid}: retrying ONCE with "
+                                  "validation_errors")
                         # burn the retry budget BEFORE submitting: a crash in
                         # this window then loses the retry rather than
                         # granting a second one (§3.6b)

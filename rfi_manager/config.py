@@ -22,6 +22,7 @@ ENV_LLM_PROVIDER = "RFI_LLM_PROVIDER"
 ENV_LLM_MODEL = "RFI_LLM_MODEL"
 ENV_DO_CUSTOM_EXTRACTION = "DO_CUSTOM_EXTRACTION"
 ENV_RESPONSE_EXTRACTION_BATCH_SIZE = "RESPONSE_EXTRACTION_BATCH_SIZE"
+ENV_LOG_FILE_LOCATION = "LOG_FILE_LOCATION"
 
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
@@ -36,6 +37,13 @@ def custom_extraction_enabled() -> bool:
         os.environ.get(ENV_DO_CUSTOM_EXTRACTION, "").strip().lower()
         in _TRUTHY_ENV_VALUES
     )
+
+
+def load_log_file_location() -> str | None:
+    """LOG_FILE_LOCATION (env): log directory; unset -> None (platform default)."""
+    load_dotenv()
+    value = os.environ.get(ENV_LOG_FILE_LOCATION, "").strip()
+    return value or None
 
 
 def load_response_extraction_batch_size() -> int | None:
