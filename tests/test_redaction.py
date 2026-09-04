@@ -4,6 +4,7 @@ diagnostic text intact (docs/PRODUCTION_READINESS.md §1)."""
 from __future__ import annotations
 
 import logging
+import threading
 
 import pytest
 
@@ -87,3 +88,41 @@ def test_logging_handlers_redact(tmp_path):
     written = log_path.read_text(encoding="utf-8")
     assert "logged-pat-value-7777" not in written
     assert "***REDACTED***" in written
+
+
+# ------------------------------------------- top-level exception handlers
+
+
+def test_uncaught_traceback_is_redacted_in_log(tmp_path):
+    """The crash handler logs a full traceback (crash forensics) but scrubbed
+    — a registered secret must not survive into the log file."""
+    from rfi_manager import logging_setup
+
+    redaction.register_secret("crash-pat-value-9999")
+    configure_logging(str(tmp_path))
+
+    try:
+        raise RuntimeError("boom with token crash-pat-value-9999")
+    except RuntimeError:
+        import sys
+        formatted = logging_setup._format_exc(*sys.exc_info())
+
+    assert "crash-pat-value-9999" not in formatted
+    assert "***REDACTED***" in formatted
+    assert "RuntimeError" in formatted  # the useful crash info is still there
+
+
+def test_install_exception_handlers_wires_hooks(tmp_path):
+    """install_exception_handlers replaces sys/threading excepthooks; restore
+    them so this can't corrupt pytest's own error reporting."""
+    import sys
+
+    from rfi_manager.logging_setup import install_exception_handlers
+
+    saved_sys, saved_thread = sys.excepthook, threading.excepthook
+    try:
+        install_exception_handlers(tmp_path / "rfi_manager.log")
+        assert sys.excepthook is not saved_sys
+        assert threading.excepthook is not saved_thread
+    finally:
+        sys.excepthook, threading.excepthook = saved_sys, saved_thread

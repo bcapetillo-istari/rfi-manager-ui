@@ -33,7 +33,11 @@ def main(argv: list[str] | None = None) -> int:
         load_log_file_location,
         load_response_extraction_batch_size,
     )
-    from .logging_setup import configure_logging, get_logger
+    from .logging_setup import (
+        configure_logging,
+        get_logger,
+        install_exception_handlers,
+    )
 
     # configure logging before anything else so startup diagnostics land in the file
     log_path = configure_logging(load_log_file_location())
@@ -69,6 +73,9 @@ def main(argv: list[str] | None = None) -> int:
     from .ui.main_window import MainWindow
 
     app = QApplication(sys.argv[:1])
+    # from here on, an uncaught exception logs + shows a dialog rather than
+    # printing to a stderr the packaged app doesn't have
+    install_exception_handlers(log_path)
     window = MainWindow(
         registry_url_prefill=config.istari.base_url,
         pat_prefill=os.environ.get("ISTARI_TOKEN", ""),

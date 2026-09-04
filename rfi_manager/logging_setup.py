@@ -7,8 +7,10 @@ dir. The UI session-log panel is fed separately (main_window.log).
 from __future__ import annotations
 
 import logging
-import os
 import sys
+import threading
+import traceback
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -87,3 +89,73 @@ def configure_logging(
 
 def get_logger() -> logging.Logger:
     return logging.getLogger(APP_LOGGER)
+
+
+def _format_exc(exc_type, exc_value, exc_tb) -> str:
+    """Redacted traceback string. The one place we deliberately keep a full
+    traceback: an uncaught crash is undebuggable without its location, and it
+    goes only to the local (redacted) log file, never a user-facing surface."""
+    return redact("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+
+
+def _show_crash_dialog(exc_value: BaseException, log_path: Path | None) -> None:
+    """A friendly, message-only dialog (never the traceback) so the app names
+    the failure instead of vanishing — only if a QApplication exists."""
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        if QApplication.instance() is None:
+            return
+        where = f"\n\nDetails were written to the log:\n{log_path}" if log_path else ""
+        QMessageBox.critical(
+            None,
+            "Unexpected error",
+            "An unexpected error occurred and has been logged.\n\n"
+            f"{type(exc_value).__name__}: {redact(str(exc_value))}{where}",
+        )
+    except Exception:
+        pass  # a crash handler must never itself raise
+
+
+def install_exception_handlers(log_path: Path | None = None) -> None:
+    """Route uncaught exceptions to the log file (with a dialog on the UI
+    thread) instead of a traceback to a stderr that a packaged app doesn't
+    have. Call once, after QApplication exists so the dialog can show."""
+    logger = get_logger()
+
+    def main_thread_hook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        logger.critical("uncaught exception:\n%s", _format_exc(exc_type, exc_value, exc_tb))
+        _show_crash_dialog(exc_value, log_path)
+
+    sys.excepthook = main_thread_hook
+
+    def thread_hook(args):
+        if issubclass(args.exc_type, SystemExit):
+            return
+        name = args.thread.name if args.thread else "?"
+        logger.critical(
+            "uncaught exception in thread %s:\n%s",
+            name, _format_exc(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = thread_hook
+
+    # Qt's own C++ messages (qWarning/qCritical/qFatal) into the same log
+    try:
+        from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+        def qt_hook(mode, _context, message):
+            msg = f"Qt: {redact(message)}"
+            if mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+                logger.error(msg)
+            elif mode == QtMsgType.QtWarningMsg:
+                logger.warning(msg)
+            else:
+                logger.debug(msg)
+
+        qInstallMessageHandler(qt_hook)
+    except Exception:
+        pass  # Qt message routing is best-effort; never block startup

@@ -30,6 +30,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import IstariConfig
+from .logging_setup import get_logger
+
+_logger = get_logger()
 
 
 class IstariError(Exception):
@@ -727,6 +730,11 @@ class IstariAdapter:
                         link.left_revision_id == source_revision_id
                         and link.right_revision_id == produced_revision_id
                     ):
+                        _logger.info(
+                            "link %s -> %s already existed (integrity conflict); "
+                            "treated as success",
+                            source_revision_id, produced_revision_id,
+                        )
                         return link
             raise IstariError(f"cannot create link: {e}") from e
         except Exception as e:
